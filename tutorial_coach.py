@@ -1,108 +1,235 @@
 """
-AI Tutorial Coach para Ancianos
-================================
-Captura la pantalla en tiempo real, se la manda a Claude con visión,
-y muestra instrucciones paso a paso en un overlay grande y claro.
+AI Tutorial Coach para Ancianos — v2
+=====================================
+El usuario escribe en el chat qué quiere aprender.
+El asistente observa la pantalla, los clicks del mouse y lo que se escribe,
+y va dando instrucciones paso a paso en lenguaje simple.
+
+Instalación:
+    pip install anthropic mss Pillow PyQt5 pynput
 
 Uso:
-    1. Configura ANTHROPIC_API_KEY en variables de entorno
-    2. Abre el programa que quieres aprender (ej: WhatsApp Web en el navegador)
-    3. Ejecuta: python tutorial_coach.py
-    4. El asistente te guiará paso a paso
+    1. Configura la variable de entorno ANTHROPIC_API_KEY
+    2. python tutorial_coach.py
+    3. Escribe en el chat qué quieres aprender (ej: "quiero mandar un mensaje a mi hijo")
+    4. Sigue las instrucciones en pantalla
 
-Dependencias:
-    pip install anthropic mss Pillow PyQt5
+NOTA: La aplicación captura clicks del mouse y texto escrito para ayudar
+      al asistente a entender qué está haciendo el usuario.
 """
 
 import sys
 import base64
 import threading
+import time
 from io import BytesIO
+from collections import deque
 
 try:
     import mss
     from PIL import Image
     import anthropic
+    from pynput import mouse as pmouse, keyboard as pkeyboard
     from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
-    from PyQt5.QtGui import QFont, QColor, QPainter, QPen, QBrush
+    from PyQt5.QtGui import QFont, QTextCursor
     from PyQt5.QtWidgets import (
-        QApplication, QLabel, QWidget, QVBoxLayout,
-        QPushButton, QHBoxLayout, QComboBox, QSizePolicy
+        QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout,
+        QPushButton, QTextEdit, QLineEdit, QFrame, QSizePolicy,
+        QScrollArea,
     )
 except ImportError as e:
     print(f"\nFalta una dependencia: {e}")
-    print("Instala con:  pip install anthropic mss Pillow PyQt5\n")
+    print("Instala con:  pip install anthropic mss Pillow PyQt5 pynput\n")
     sys.exit(1)
 
 
-# ─────────────────────────────────────────────
-#  Herramientas disponibles para enseñar
-# ─────────────────────────────────────────────
-TOOLS = {
-    "WhatsApp Web": "WhatsApp Web (mensajería por navegador)",
-    "Gmail": "Gmail (correo electrónico en el navegador)",
-    "YouTube": "YouTube (ver videos en el navegador)",
-    "Google Maps": "Google Maps (buscar lugares y rutas)",
-    "Zoom": "Zoom (videollamadas)",
-}
+# ───────────────────────────────────────────────────────────
+#  Constantes
+# ───────────────────────────────────────────────────────────
+DEBOUNCE_SECONDS = 2.5      # segundos de inactividad antes de analizar
+MAX_EVENTS = 15             # eventos recientes a enviar a la IA
+MAX_HISTORY = 24            # mensajes máximos en historial de conversación
 
-SYSTEM_PROMPT_TEMPLATE = """Eres un asistente muy amable y paciente que ayuda a personas mayores a aprender a usar {tool}.
+SYSTEM_PROMPT = """Eres un asistente muy amable, paciente y claro que ayuda a personas mayores \
+a usar internet en su computadora.
 
-Estás viendo una captura de pantalla de su computadora. Tu tarea es dar UNA sola instrucción, muy simple y concreta, sobre qué hacer a continuación.
+Tienes acceso a:
+1. Una captura de la pantalla actual del usuario
+2. Lo que el usuario te escribió en el chat (su objetivo)
+3. Los eventos recientes: clicks del mouse y texto que escribió en la pantalla
+
+Tu tarea es dar UNA sola instrucción concreta y simple sobre qué hacer a continuación.
 
 Reglas estrictas:
-- Da SOLO UN paso a la vez
-- Usa palabras simples, sin tecnicismos. Nada de "hacer clic" → di "presionar". Nada de "URL" → di "la barra de dirección arriba".
-- Describe con precisión DÓNDE está el elemento: color, posición en pantalla, texto que dice
-- Si el usuario ya completó el paso anterior, avanza al siguiente paso
-- Máximo 2 oraciones cortas por instrucción
-- Tono muy amable y alentador. Usa frases como "¡Muy bien!", "¡Excelente!", "Ahora..."
-- Si la pantalla no muestra {tool}, indica primero cómo llegar ahí
+- Una sola acción por respuesta. Nunca des dos pasos a la vez.
+- Lenguaje muy simple. Evita tecnicismos. Di "presiona" en vez de "haz clic". \
+Di "la barra de arriba donde dice la dirección" en vez de "URL". \
+Di "el botón verde grande" en vez de "botón de confirmación".
+- Describe exactamente DÓNDE está el elemento: color, posición, texto que muestra.
+- Si el usuario ya hizo lo que pediste (lo ves en los eventos o en la pantalla), \
+reconócelo con entusiasmo antes de dar el siguiente paso.
+- Si ves que el usuario cometió un error, dile cómo corregirlo amablemente.
+- Tono cálido y motivador. Usa "¡Muy bien!", "¡Perfecto!", "¡Casi listo!".
+- Máximo 3 oraciones cortas.
 
-Responde ÚNICAMENTE con la instrucción. Sin títulos, sin numeración, sin explicaciones extra."""
+Responde ÚNICAMENTE con la instrucción. Sin numeración, sin títulos, sin texto extra."""
 
 
-# ─────────────────────────────────────────────
-#  Señales Qt para comunicación entre hilos
-# ─────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
+#  Señales Qt (comunicación entre hilos → UI)
+# ───────────────────────────────────────────────────────────
 class Signals(QObject):
-    instruction_ready = pyqtSignal(str)
-    status_changed = pyqtSignal(str)
-    error_occurred = pyqtSignal(str)
+    instruction_ready   = pyqtSignal(str)   # nueva instrucción de la IA
+    status_changed      = pyqtSignal(str)   # texto de estado pequeño
+    activity_logged     = pyqtSignal(str)   # evento de mouse/teclado
+    chat_reply          = pyqtSignal(str)   # mensaje IA en el chat
 
 
-# ─────────────────────────────────────────────
-#  Lógica de IA: captura pantalla + llama Claude
-# ─────────────────────────────────────────────
-class AICoach:
-    def __init__(self, signals: Signals):
+# ───────────────────────────────────────────────────────────
+#  Monitor de eventos (mouse + teclado) con pynput
+# ───────────────────────────────────────────────────────────
+class EventMonitor:
+    """Escucha mouse y teclado en background y acumula eventos en un buffer."""
+
+    def __init__(self, signals: Signals, on_activity):
         self.signals = signals
-        self.client = anthropic.Anthropic()
-        self.text_history = []   # historial solo texto (sin imágenes) para contexto
-        self.tool_name = list(TOOLS.keys())[0]
-        self._busy = False
+        self.on_activity = on_activity          # callback al detectar actividad
+        self.events: deque = deque(maxlen=MAX_EVENTS)
+        self._typed: list  = []                  # buffer de texto en curso
+        self._overlay_rect = None                # (x, y, w, h) del overlay
+        self._mouse_listener    = None
+        self._keyboard_listener = None
+        self._ignore_keyboard   = False          # True cuando el chat tiene foco
+
+    # ── Ciclo de vida ──────────────────────────────────────
+    def start(self):
+        self._mouse_listener = pmouse.Listener(on_click=self._on_click)
+        self._keyboard_listener = pkeyboard.Listener(on_press=self._on_key)
+        self._mouse_listener.daemon = True
+        self._keyboard_listener.daemon = True
+        self._mouse_listener.start()
+        self._keyboard_listener.start()
+
+    def stop(self):
+        if self._mouse_listener:
+            self._mouse_listener.stop()
+        if self._keyboard_listener:
+            self._keyboard_listener.stop()
+
+    def set_overlay_rect(self, x: int, y: int, w: int, h: int):
+        self._overlay_rect = (x, y, w, h)
+
+    def set_ignore_keyboard(self, ignore: bool):
+        self._ignore_keyboard = ignore
+
+    # ── Handlers de eventos ───────────────────────────────
+    def _in_overlay(self, x: int, y: int) -> bool:
+        if not self._overlay_rect:
+            return False
+        ox, oy, ow, oh = self._overlay_rect
+        return ox <= x <= ox + ow and oy <= y <= oy + oh
+
+    def _flush_typed(self):
+        if self._typed:
+            text = "".join(self._typed).strip()
+            if text:
+                evt = f'Escribió: "{text[:60]}"'
+                self.events.append(evt)
+                self.signals.activity_logged.emit(f"⌨  {evt}")
+            self._typed.clear()
+
+    def _on_click(self, x, y, button, pressed):
+        if not pressed or self._in_overlay(x, y):
+            return
+        self._flush_typed()
+        evt = f"Click del mouse en posición ({x}, {y})"
+        self.events.append(evt)
+        self.signals.activity_logged.emit(f"🖱  ({x}, {y})")
+        self.on_activity()
+
+    def _on_key(self, key):
+        if self._ignore_keyboard:
+            return
+        try:
+            char = key.char
+            if char and char.isprintable():
+                self._typed.append(char)
+                self.on_activity()
+        except AttributeError:
+            if key == pkeyboard.Key.backspace:
+                if self._typed:
+                    self._typed.pop()
+            elif key == pkeyboard.Key.enter:
+                self._flush_typed()
+                self.events.append("Presionó Enter")
+                self.signals.activity_logged.emit("↵  Enter")
+                self.on_activity()
+            elif key == pkeyboard.Key.space:
+                self._typed.append(" ")
+
+    # ── API pública ───────────────────────────────────────
+    def get_summary(self) -> str:
+        self._flush_typed()
+        if not self.events:
+            return "Sin actividad de mouse o teclado desde la última consulta."
+        return "\n".join(f"- {e}" for e in self.events)
+
+    def clear(self):
+        self.events.clear()
+        self._typed.clear()
+
+
+# ───────────────────────────────────────────────────────────
+#  Timer de debounce simple (cancela y reinicia)
+# ───────────────────────────────────────────────────────────
+class DebounceTimer:
+    def __init__(self, delay: float, callback):
+        self.delay = delay
+        self.callback = callback
+        self._timer = None
         self._lock = threading.Lock()
 
-    def set_tool(self, tool_name: str):
-        self.tool_name = tool_name
-        self.text_history = []   # reinicia historial al cambiar herramienta
+    def trigger(self):
+        with self._lock:
+            if self._timer:
+                self._timer.cancel()
+            self._timer = threading.Timer(self.delay, self.callback)
+            self._timer.daemon = True
+            self._timer.start()
 
-    def _capture_screen(self) -> str:
-        """Captura la pantalla principal y devuelve JPEG en base64."""
+    def cancel(self):
+        with self._lock:
+            if self._timer:
+                self._timer.cancel()
+                self._timer = None
+
+
+# ───────────────────────────────────────────────────────────
+#  Lógica de IA (Claude con visión)
+# ───────────────────────────────────────────────────────────
+class AICoach:
+    def __init__(self, signals: Signals):
+        self.signals  = signals
+        self.client   = anthropic.Anthropic()
+        self.history  = []          # conversación texto (sin imágenes)
+        self.goal     = ""          # objetivo del usuario
+        self._busy    = False
+        self._lock    = threading.Lock()
+
+    # ── Captura de pantalla ───────────────────────────────
+    def _capture(self) -> str:
         with mss.mss() as sct:
             monitor = sct.monitors[1]
-            screenshot = sct.grab(monitor)
-            img = Image.frombytes(
-                "RGB", screenshot.size, screenshot.bgra, "raw", "BGRX"
-            )
-            # Reducir tamaño para ahorrar tokens (max 1280px ancho)
+            shot = sct.grab(monitor)
+            img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
             img.thumbnail((1280, 720), Image.LANCZOS)
             buf = BytesIO()
             img.save(buf, format="JPEG", quality=82)
-            return base64.b64encode(buf.getvalue()).decode("utf-8")
+            return base64.b64encode(buf.getvalue()).decode()
 
-    def get_instruction(self):
-        """Analiza la pantalla y emite la siguiente instrucción. No bloquea."""
+    # ── Consulta a la IA ──────────────────────────────────
+    def analyze(self, events_summary: str, user_message: str = ""):
+        """Llama a Claude en un hilo separado. No bloquea."""
         with self._lock:
             if self._busy:
                 return
@@ -110,16 +237,22 @@ class AICoach:
 
         def _run():
             try:
-                self.signals.status_changed.emit("Analizando tu pantalla...")
+                self.signals.status_changed.emit("Analizando pantalla y actividad...")
+                image_b64 = self._capture()
 
-                image_b64 = self._capture_screen()
-                system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-                    tool=TOOLS[self.tool_name]
-                )
+                # Construir el texto de contexto para este turno
+                parts = []
+                if self.goal:
+                    parts.append(f"Objetivo del usuario: {self.goal}")
+                if events_summary and "Sin actividad" not in events_summary:
+                    parts.append(f"Actividad reciente:\n{events_summary}")
+                if user_message:
+                    parts.append(f"El usuario dice: {user_message}")
+                parts.append("Esta es la pantalla ahora mismo. ¿Cuál es el siguiente paso?")
+                context_text = "\n\n".join(parts)
 
-                # Construcción del mensaje: historial texto + imagen actual
-                messages = list(self.text_history)
-                messages.append({
+                # Mensajes: historial texto + imagen actual
+                messages = list(self.history) + [{
                     "role": "user",
                     "content": [
                         {
@@ -130,262 +263,359 @@ class AICoach:
                                 "data": image_b64,
                             },
                         },
-                        {
-                            "type": "text",
-                            "text": "Esta es mi pantalla ahora mismo. ¿Qué debo hacer?",
-                        },
+                        {"type": "text", "text": context_text},
                     ],
-                })
+                }]
 
                 response = self.client.messages.create(
                     model="claude-opus-4-6",
-                    max_tokens=220,
-                    system=system_prompt,
+                    max_tokens=250,
+                    system=SYSTEM_PROMPT,
                     messages=messages,
                 )
-
                 instruction = response.content[0].text.strip()
 
-                # Guardar en historial solo texto (las imágenes se descartan)
-                self.text_history.append({
-                    "role": "user",
-                    "content": "El usuario está mirando la pantalla.",
-                })
-                self.text_history.append({
-                    "role": "assistant",
-                    "content": instruction,
-                })
-
-                # Mantener últimas 10 exchanges (20 mensajes)
-                if len(self.text_history) > 20:
-                    self.text_history = self.text_history[-20:]
+                # Guardar en historial solo texto (imágenes se descartan)
+                summary = context_text.replace(image_b64, "")[:200]
+                self.history.append({"role": "user",      "content": summary})
+                self.history.append({"role": "assistant", "content": instruction})
+                if len(self.history) > MAX_HISTORY:
+                    self.history = self.history[-MAX_HISTORY:]
 
                 self.signals.instruction_ready.emit(instruction)
-                self.signals.status_changed.emit("Listo  •  se actualiza cada 10 s")
+                self.signals.chat_reply.emit(instruction)
+                self.signals.status_changed.emit("Listo  •  activo")
 
             except anthropic.AuthenticationError:
-                self.signals.error_occurred.emit(
-                    "Error: ANTHROPIC_API_KEY inválida o no configurada."
-                )
+                msg = "Error de API: verifica tu ANTHROPIC_API_KEY."
+                self.signals.instruction_ready.emit(f"⚠  {msg}")
+                self.signals.status_changed.emit("Error de autenticación")
             except Exception as exc:
-                self.signals.error_occurred.emit(f"Error inesperado: {exc}")
+                msg = f"Error inesperado: {exc}"
+                self.signals.instruction_ready.emit(f"⚠  {msg}")
+                self.signals.status_changed.emit("Error")
             finally:
                 with self._lock:
                     self._busy = False
 
-        thread = threading.Thread(target=_run, daemon=True)
-        thread.start()
+        threading.Thread(target=_run, daemon=True).start()
+
+    def reset(self):
+        self.history.clear()
+        self.goal = ""
 
 
-# ─────────────────────────────────────────────
-#  Overlay visual — panel de instrucciones
-# ─────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
+#  Overlay PyQt5
+# ───────────────────────────────────────────────────────────
+STYLE = """
+QWidget#root {
+    background-color: #111827;
+    border: 2px solid #22c55e;
+    border-radius: 16px;
+}
+QLabel#header_label {
+    color: #22c55e;
+    background: transparent;
+}
+QLabel#instruction_label {
+    color: #f9fafb;
+    background: transparent;
+}
+QLabel#status_label {
+    color: #6b7280;
+    background: transparent;
+}
+QTextEdit#chat_log {
+    background-color: #1f2937;
+    color: #d1d5db;
+    border: 1px solid #374151;
+    border-radius: 8px;
+    padding: 6px;
+}
+QLineEdit#chat_input {
+    background-color: #1f2937;
+    color: #f9fafb;
+    border: 2px solid #374151;
+    border-radius: 8px;
+    padding: 8px 12px;
+}
+QLineEdit#chat_input:focus {
+    border-color: #22c55e;
+}
+QPushButton {
+    background-color: #22c55e;
+    color: #111827;
+    border: none;
+    border-radius: 8px;
+    padding: 9px 18px;
+    font-weight: bold;
+}
+QPushButton:hover    { background-color: #16a34a; }
+QPushButton:disabled { background-color: #374151; color: #6b7280; }
+QPushButton#reset_btn {
+    background-color: #374151;
+    color: #9ca3af;
+}
+QPushButton#reset_btn:hover { background-color: #4b5563; }
+QFrame#divider {
+    color: #374151;
+    background-color: #374151;
+}
+"""
+
+
 class TutorialOverlay(QWidget):
+    chat_submitted = pyqtSignal(str)      # usuario envió mensaje en el chat
+    chat_focus_changed = pyqtSignal(bool) # True = input tiene foco
+
     def __init__(self):
         super().__init__()
         self.setWindowFlags(
             Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool
         )
-        # Fondo sólido oscuro (no translúcido para mejor legibilidad)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
         self._build_ui()
-        self._position_bottom_center()
+        self._place_on_screen()
 
-    # ── Construcción de la UI ──────────────────
+    # ── Construcción de UI ────────────────────────────────
     def _build_ui(self):
-        self.setStyleSheet("""
-            QWidget#panel {
-                background-color: #1a1a2e;
-                border: 2px solid #4ade80;
-                border-radius: 14px;
-            }
-            QLabel#header {
-                color: #4ade80;
-                background: transparent;
-            }
-            QLabel#instruction {
-                color: #ffffff;
-                background: transparent;
-            }
-            QLabel#status {
-                color: #888888;
-                background: transparent;
-            }
-            QPushButton {
-                background-color: #4ade80;
-                color: #1a1a2e;
-                border: none;
-                border-radius: 8px;
-                padding: 10px 20px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #22c55e; }
-            QPushButton:disabled { background-color: #374151; color: #6b7280; }
-            QComboBox {
-                background-color: #374151;
-                color: white;
-                border: 1px solid #4b5563;
-                border-radius: 6px;
-                padding: 6px 10px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #1f2937;
-                color: white;
-                selection-background-color: #4ade80;
-                selection-color: #1a1a2e;
-            }
-        """)
+        self.setStyleSheet(STYLE)
 
-        # Panel contenedor
-        panel = QWidget(self)
-        panel.setObjectName("panel")
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(panel)
+        root = QWidget(self)
+        root.setObjectName("root")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(root)
 
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(24, 18, 24, 18)
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(22, 16, 22, 16)
         layout.setSpacing(10)
 
-        # — Fila superior: título + selector de herramienta —
-        top_row = QHBoxLayout()
-
+        # ── Cabecera ─────────────────────────────────────
+        header_row = QHBoxLayout()
         header = QLabel("🧭  Asistente paso a paso")
-        header.setObjectName("header")
+        header.setObjectName("header_label")
         header.setFont(QFont("Arial", 13, QFont.Bold))
-        top_row.addWidget(header)
+        header_row.addWidget(header)
+        header_row.addStretch()
 
-        top_row.addStretch()
+        self.status_label = QLabel("Listo para comenzar")
+        self.status_label.setObjectName("status_label")
+        self.status_label.setFont(QFont("Arial", 11))
+        header_row.addWidget(self.status_label)
 
-        self.tool_selector = QComboBox()
-        self.tool_selector.setFont(QFont("Arial", 12))
-        for name in TOOLS:
-            self.tool_selector.addItem(name)
-        top_row.addWidget(self.tool_selector)
+        reset_btn = QPushButton("↺ Reiniciar")
+        reset_btn.setObjectName("reset_btn")
+        reset_btn.setObjectName("reset_btn")
+        reset_btn.setFont(QFont("Arial", 11))
+        reset_btn.setFixedWidth(110)
+        reset_btn.clicked.connect(self._on_reset_clicked)
+        header_row.addWidget(reset_btn)
+        layout.addLayout(header_row)
 
-        layout.addLayout(top_row)
-
-        # — Instrucción principal (texto grande) —
-        self.instruction_label = QLabel("Presiona el botón para comenzar.")
-        self.instruction_label.setObjectName("instruction")
-        self.instruction_label.setFont(QFont("Arial", 22, QFont.Bold))
+        # ── Instrucción grande ────────────────────────────
+        self.instruction_label = QLabel("Escríbeme en el chat qué quieres aprender.")
+        self.instruction_label.setObjectName("instruction_label")
+        self.instruction_label.setFont(QFont("Arial", 21, QFont.Bold))
         self.instruction_label.setWordWrap(True)
-        self.instruction_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.instruction_label.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Minimum
-        )
+        self.instruction_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.instruction_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.instruction_label.setMinimumHeight(80)
         layout.addWidget(self.instruction_label)
 
-        # — Fila inferior: estado + botones —
-        bottom_row = QHBoxLayout()
+        # ── Divisor ───────────────────────────────────────
+        line = QFrame()
+        line.setObjectName("divider")
+        line.setFrameShape(QFrame.HLine)
+        line.setFixedHeight(1)
+        layout.addWidget(line)
 
-        self.status_label = QLabel("Listo para empezar")
-        self.status_label.setObjectName("status")
-        self.status_label.setFont(QFont("Arial", 11))
-        bottom_row.addWidget(self.status_label)
+        # ── Log de actividad (pequeño, colapsable) ────────
+        activity_row = QHBoxLayout()
+        act_title = QLabel("Actividad reciente:")
+        act_title.setFont(QFont("Arial", 10))
+        act_title.setStyleSheet("color: #6b7280; background: transparent;")
+        activity_row.addWidget(act_title)
+        activity_row.addStretch()
+        layout.addLayout(activity_row)
 
-        bottom_row.addStretch()
+        self.activity_log = QTextEdit()
+        self.activity_log.setObjectName("chat_log")
+        self.activity_log.setReadOnly(True)
+        self.activity_log.setFont(QFont("Consolas", 10))
+        self.activity_log.setFixedHeight(60)
+        layout.addWidget(self.activity_log)
 
-        self.restart_btn = QPushButton("↺  Reiniciar")
-        self.restart_btn.setFont(QFont("Arial", 12))
-        self.restart_btn.setFixedWidth(130)
-        bottom_row.addWidget(self.restart_btn)
+        # ── Chat ──────────────────────────────────────────
+        chat_title = QLabel("Chat — escribe qué quieres hacer:")
+        chat_title.setFont(QFont("Arial", 11, QFont.Bold))
+        chat_title.setStyleSheet("color: #d1d5db; background: transparent;")
+        layout.addWidget(chat_title)
 
-        self.analyze_btn = QPushButton("▶  Siguiente paso")
-        self.analyze_btn.setFont(QFont("Arial", 13, QFont.Bold))
-        self.analyze_btn.setFixedWidth(180)
-        bottom_row.addWidget(self.analyze_btn)
+        self.chat_log = QTextEdit()
+        self.chat_log.setObjectName("chat_log")
+        self.chat_log.setReadOnly(True)
+        self.chat_log.setFont(QFont("Arial", 12))
+        self.chat_log.setFixedHeight(110)
+        layout.addWidget(self.chat_log)
 
-        layout.addLayout(bottom_row)
+        # ── Entrada de chat ───────────────────────────────
+        input_row = QHBoxLayout()
+        self.chat_input = QLineEdit()
+        self.chat_input.setObjectName("chat_input")
+        self.chat_input.setFont(QFont("Arial", 14))
+        self.chat_input.setPlaceholderText(
+            "Ej: quiero mandar un mensaje a mi hijo por WhatsApp..."
+        )
+        self.chat_input.returnPressed.connect(self._on_send)
+        self.chat_input.focusInEvent  = self._input_focus_in
+        self.chat_input.focusOutEvent = self._input_focus_out
+        input_row.addWidget(self.chat_input)
 
-    # ── Posición: parte inferior centrada ─────
-    def _position_bottom_center(self):
+        send_btn = QPushButton("Enviar  ▶")
+        send_btn.setFont(QFont("Arial", 13, QFont.Bold))
+        send_btn.setFixedWidth(120)
+        send_btn.clicked.connect(self._on_send)
+        input_row.addWidget(send_btn)
+        layout.addLayout(input_row)
+
+    # ── Posición ──────────────────────────────────────────
+    def _place_on_screen(self):
         screen = QApplication.primaryScreen().geometry()
-        w = min(820, screen.width() - 60)
-        # Altura mínima — Qt la expandirá si el texto es largo
+        w = min(860, screen.width() - 40)
         self.setFixedWidth(w)
+        self.adjustSize()
         x = (screen.width() - w) // 2
-        y = screen.height() - 260
+        y = screen.height() - self.sizeHint().height() - 30
         self.move(x, y)
 
-    # ── Slots públicos ─────────────────────────
+    # ── Handlers internos ─────────────────────────────────
+    def _on_send(self):
+        text = self.chat_input.text().strip()
+        if not text:
+            return
+        self.chat_input.clear()
+        self._append_chat("Tú", text, "#86efac")
+        self.chat_submitted.emit(text)
+
+    def _on_reset_clicked(self):
+        self.chat_log.clear()
+        self.activity_log.clear()
+        self.instruction_label.setText("Historial borrado. ¿Qué quieres aprender ahora?")
+        self.status_label.setText("Reiniciado")
+        # Emitir vacío para que el app resetee el coach
+        self.chat_submitted.emit("")
+
+    def _input_focus_in(self, event):
+        self.chat_focus_changed.emit(True)
+        QLineEdit.focusInEvent(self.chat_input, event)
+
+    def _input_focus_out(self, event):
+        self.chat_focus_changed.emit(False)
+        QLineEdit.focusOutEvent(self.chat_input, event)
+
+    # ── API pública ───────────────────────────────────────
     def show_instruction(self, text: str):
         self.instruction_label.setText(text)
-        self.analyze_btn.setEnabled(True)
         self.adjustSize()
+        # Reposicionar por si cambió el alto
+        screen = QApplication.primaryScreen().geometry()
+        y = screen.height() - self.height() - 30
+        self.move(self.x(), y)
 
     def show_status(self, text: str):
         self.status_label.setText(text)
 
-    def show_error(self, text: str):
-        self.instruction_label.setText(f"⚠  {text}")
-        self.status_label.setText("Ocurrió un error")
-        self.analyze_btn.setEnabled(True)
+    def log_activity(self, text: str):
+        self.activity_log.append(text)
+        self.activity_log.moveCursor(QTextCursor.End)
 
-    def set_busy(self):
-        self.analyze_btn.setEnabled(False)
-        self.status_label.setText("Analizando pantalla...")
+    def _append_chat(self, who: str, text: str, color: str):
+        self.chat_log.append(
+            f'<span style="color:{color};font-weight:bold">{who}:</span> '
+            f'<span style="color:#f3f4f6">{text}</span>'
+        )
+        self.chat_log.moveCursor(QTextCursor.End)
+
+    def show_ai_reply(self, text: str):
+        self._append_chat("Asistente", text, "#60a5fa")
+
+    def get_overlay_rect(self):
+        pos = self.pos()
+        size = self.size()
+        return pos.x(), pos.y(), size.width(), size.height()
 
 
-# ─────────────────────────────────────────────
-#  Aplicación principal
-# ─────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
+#  Orquestador principal
+# ───────────────────────────────────────────────────────────
 class TutorialApp:
     def __init__(self):
         self.qt_app = QApplication(sys.argv)
         self.qt_app.setApplicationName("Asistente Tutorial")
 
-        self.signals = Signals()
-        self.coach = AICoach(self.signals)
-        self.overlay = TutorialOverlay()
+        self.signals  = Signals()
+        self.coach    = AICoach(self.signals)
+        self.overlay  = TutorialOverlay()
+        self.monitor  = EventMonitor(self.signals, on_activity=self._on_user_activity)
+        self.debounce = DebounceTimer(DEBOUNCE_SECONDS, self._trigger_analysis)
 
-        self._connect_signals()
-        self._setup_timer()
+        self._connect()
+        self._update_overlay_rect()
 
-    def _connect_signals(self):
-        # Señales de la IA → overlay
+    def _connect(self):
+        # Señales IA → overlay
         self.signals.instruction_ready.connect(self.overlay.show_instruction)
         self.signals.status_changed.connect(self.overlay.show_status)
-        self.signals.error_occurred.connect(self.overlay.show_error)
+        self.signals.activity_logged.connect(self.overlay.log_activity)
+        self.signals.chat_reply.connect(self.overlay.show_ai_reply)
 
-        # Botones del overlay
-        self.overlay.analyze_btn.clicked.connect(self._on_analyze)
-        self.overlay.restart_btn.clicked.connect(self._on_restart)
-        self.overlay.tool_selector.currentTextChanged.connect(self._on_tool_changed)
+        # Eventos del overlay → lógica
+        self.overlay.chat_submitted.connect(self._on_chat_message)
+        self.overlay.chat_focus_changed.connect(self.monitor.set_ignore_keyboard)
 
-    def _setup_timer(self):
-        """Analiza automáticamente cada 10 segundos."""
-        self.timer = QTimer()
-        self.timer.timeout.connect(self._on_analyze)
-        self.timer.start(10_000)
+    def _update_overlay_rect(self):
+        """Le dice al monitor qué área ignorar (el propio overlay)."""
+        rect = self.overlay.get_overlay_rect()
+        self.monitor.set_overlay_rect(*rect)
 
-    # ── Handlers ──────────────────────────────
-    def _on_analyze(self):
-        self.overlay.set_busy()
-        self.coach.get_instruction()
-
-    def _on_restart(self):
-        self.coach.text_history = []
-        self.overlay.show_instruction("Historial borrado. Presiona 'Siguiente paso' para empezar de nuevo.")
-        self.overlay.show_status("Reiniciado")
-
-    def _on_tool_changed(self, name: str):
-        self.coach.set_tool(name)
-        self.overlay.show_instruction(
-            f"Ahora te enseñaré a usar {name}. Presiona 'Siguiente paso' cuando estés listo."
+    # ── Handlers ─────────────────────────────────────────
+    def _on_chat_message(self, text: str):
+        if not text:
+            self.coach.reset()
+            return
+        self.coach.goal = text
+        self.debounce.cancel()
+        self.coach.analyze(
+            events_summary=self.monitor.get_summary(),
+            user_message=text
         )
-        self.overlay.show_status("Herramienta cambiada — historial borrado")
+        self.monitor.clear()
+
+    def _on_user_activity(self):
+        """Llamado cada vez que hay un click o tecla. Inicia debounce."""
+        self.debounce.trigger()
+
+    def _trigger_analysis(self):
+        """Disparado por el debounce tras inactividad."""
+        if not self.coach.goal:
+            return   # no analizar si aún no hay objetivo
+        summary = self.monitor.get_summary()
+        self.monitor.clear()
+        self.coach.analyze(events_summary=summary)
 
     def run(self):
         self.overlay.show()
+        self._update_overlay_rect()
+        self.monitor.start()
         sys.exit(self.qt_app.exec_())
 
 
-# ─────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("=" * 55)
-    print("  AI Tutorial Coach para Ancianos")
-    print("  Asegúrate de tener ANTHROPIC_API_KEY configurada")
-    print("=" * 55)
-    app = TutorialApp()
-    app.run()
+    print("=" * 60)
+    print("  AI Tutorial Coach para Ancianos  —  v2")
+    print("  Requiere: ANTHROPIC_API_KEY en variables de entorno")
+    print("=" * 60)
+    TutorialApp().run()
