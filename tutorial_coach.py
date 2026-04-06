@@ -48,12 +48,17 @@ CLICK_RADIUS   = 90    # píxeles de tolerancia para auto-avance
 ANIM_INTERVAL  = 40    # ms entre frames de animación (~25fps)
 
 PLAN_SYSTEM = """Eres un asistente experto en usabilidad que ayuda a personas mayores a usar la computadora.
-Analizas capturas de pantalla y generas planes paso a paso muy claros y simples."""
+Analizas capturas de pantalla con cuadrícula de coordenadas y generas planes paso a paso muy claros y simples."""
 
-PLAN_USER = """Analiza esta captura de pantalla (resolución real: {w}x{h} px) y crea un plan
-paso a paso para que una persona mayor pueda: {goal}
+PLAN_USER = """Analiza esta captura de pantalla. La resolución física real del monitor es {w}x{h} px.
 
-Responde ÚNICAMENTE con JSON válido, sin texto antes ni después, con este formato exacto:
+CUADRÍCULA DE REFERENCIA: La imagen tiene líneas rojas cada 200 píxeles con números que indican
+la posición exacta. El eje X va de izquierda (0) a derecha ({w}). El eje Y va de arriba (0) a abajo ({h}).
+USA los números de la cuadrícula para dar coordenadas exactas.
+
+Crea un plan paso a paso para que una persona mayor pueda: {goal}
+
+Responde ÚNICAMENTE con JSON válido, sin texto antes ni después:
 {{
   "title": "Título corto del plan",
   "steps": [
@@ -61,18 +66,18 @@ Responde ÚNICAMENTE con JSON válido, sin texto antes ni después, con este for
       "n": 1,
       "instruction": "Instrucción simple de máximo 12 palabras",
       "target_x": 640,
-      "target_y": 360
+      "target_y": 360,
+      "element": "descripción visual del elemento (color, texto, forma)"
     }}
   ]
 }}
 
 Reglas CRÍTICAS:
-- Instrucciones en español, simples, sin tecnicismos. Di "presiona" no "haz clic".
-  Di "la barra de arriba donde dice la dirección web" no "URL bar".
-- Una sola acción por paso.
-- target_x y target_y son coordenadas del CENTRO del elemento en la pantalla REAL ({w}x{h}).
-- Si la pantalla no muestra lo necesario, el primer paso indica cómo llegar ahí.
-- Máximo 8 pasos."""
+- target_x y target_y = píxeles del CENTRO EXACTO del elemento usando la cuadrícula roja.
+  Interpola entre líneas si es necesario (ej: entre la línea 400 y 600 → 500).
+- Instrucciones en español, simples. Di "presiona" no "haz clic". Di "barra de dirección arriba" no "URL".
+- Una sola acción por paso. Máximo 8 pasos.
+- Si la pantalla no muestra lo necesario, el primer paso indica cómo abrir la aplicación correcta."""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -207,17 +212,23 @@ class AnnotationOverlay(QWidget):
         pulse  = 0.75 + 0.25 * math.sin(self._phase)       # 0.75 – 1.0
         bounce = int(6  * math.sin(self._phase * 1.3))     # rebote suave
 
-        # ── 1. Anillo pulsante alrededor del target ────────────────────────
-        for r, alpha in [(55, 60), (38, 100), (22, 180)]:
+        # ── 1. Glow exterior difuso ────────────────────────────────────────
+        for r, alpha in [(72, 18), (54, 35), (38, 65), (24, 120)]:
             r = int(r * pulse)
-            p.setPen(QPen(QColor(74, 222, 128, alpha), 2))
-            p.setBrush(QBrush(QColor(74, 222, 128, max(0, alpha - 130))))
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(QColor(56, 220, 180, alpha)))
             p.drawEllipse(QPoint(tx, ty), r, r)
 
-        # ── 2. Cruz central ────────────────────────────────────────────────
-        p.setPen(QPen(QColor(250, 204, 21), 3, Qt.SolidLine, Qt.RoundCap))
-        p.drawLine(tx - 10, ty, tx + 10, ty)
-        p.drawLine(tx, ty - 10, tx, ty + 10)
+        # ── 2. Anillo exterior nítido ──────────────────────────────────────
+        ring_r = int(28 * pulse)
+        p.setPen(QPen(QColor(56, 220, 180, 220), 2))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(QPoint(tx, ty), ring_r, ring_r)
+
+        # ── 3. Punto central ──────────────────────────────────────────────
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(QColor(255, 255, 255, 230)))
+        p.drawEllipse(QPoint(tx, ty), 4, 4)
 
         # ── 3. Burbuja de texto ────────────────────────────────────────────
         bw, bh = 320, 110
@@ -253,27 +264,39 @@ class AnnotationOverlay(QWidget):
                      step_n: int, total: int, text: str):
         rect = QRect(bx, by, bw, bh)
 
-        # Fondo con gradiente oscuro semitransparente
+        # Sombra suave
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(QColor(0, 0, 0, 60)))
+        path_shadow = QPainterPath()
+        path_shadow.addRoundedRect(bx + 4, by + 4, bw, bh, 16, 16)
+        p.drawPath(path_shadow)
+
+        # Fondo glassmorphism
         grad = QLinearGradient(bx, by, bx, by + bh)
-        grad.setColorAt(0, QColor(17, 24, 39, 230))
-        grad.setColorAt(1, QColor(31, 41, 55, 230))
+        grad.setColorAt(0, QColor(8,  14, 32, 220))
+        grad.setColorAt(1, QColor(14, 22, 48, 210))
         p.setBrush(QBrush(grad))
-        p.setPen(QPen(QColor(74, 222, 128), 2))
+        p.setPen(QPen(QColor(56, 220, 180, 180), 1))
         path = QPainterPath()
-        path.addRoundedRect(bx, by, bw, bh, 14, 14)
+        path.addRoundedRect(bx, by, bw, bh, 16, 16)
         p.drawPath(path)
 
+        # Línea de acento superior
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(QColor(56, 220, 180, 120)))
+        p.drawRoundedRect(bx + 1, by + 1, bw - 2, 3, 2, 2)
+
         # Etiqueta de paso
-        p.setFont(QFont("Arial", 10, QFont.Bold))
-        p.setPen(QColor(74, 222, 128))
+        p.setFont(QFont("Arial", 9, QFont.Bold))
+        p.setPen(QColor(56, 220, 180, 200))
         p.drawText(rect.adjusted(14, 10, -14, 0),
                    Qt.AlignTop | Qt.AlignLeft,
                    f"PASO {step_n} DE {total}")
 
-        # Texto de instrucción
+        # Texto instrucción
         p.setFont(QFont("Arial", 14, QFont.Bold))
-        p.setPen(QColor(249, 250, 251))
-        p.drawText(rect.adjusted(14, 28, -14, -10),
+        p.setPen(QColor(235, 240, 255))
+        p.drawText(rect.adjusted(14, 26, -14, -10),
                    Qt.AlignVCenter | Qt.AlignLeft | Qt.TextWordWrap,
                    text)
 
@@ -290,23 +313,28 @@ class AnnotationOverlay(QWidget):
         ex = x2 - int(dx / length * short)
         ey = y2 - int(dy / length * short)
 
-        # Línea con contorno
-        for color, width in [(QColor(0, 0, 0, 160), 6), (QColor(250, 204, 21), 3)]:
-            p.setPen(QPen(color, width, Qt.SolidLine, Qt.RoundCap))
-            p.drawLine(x1, y1, ex, ey)
+        # Sombra de la línea
+        p.setPen(QPen(QColor(0, 0, 0, 80), 5, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(x1 + 2, y1 + 2, ex + 2, ey + 2)
+
+        # Línea principal con gradiente simulado (dos capas)
+        p.setPen(QPen(QColor(56, 220, 180, 180), 3, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(x1, y1, ex, ey)
+        p.setPen(QPen(QColor(200, 255, 240, 100), 1, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(x1, y1, ex, ey)
 
         # Cabeza de flecha
         angle = math.atan2(ey - y1, ex - x1)
-        head  = 16
+        head  = 14
         pts   = QPolygonF([
             QPointF(ex, ey),
-            QPointF(ex - head * math.cos(angle - 0.45),
-                    ey - head * math.sin(angle - 0.45)),
-            QPointF(ex - head * math.cos(angle + 0.45),
-                    ey - head * math.sin(angle + 0.45)),
+            QPointF(ex - head * math.cos(angle - 0.42),
+                    ey - head * math.sin(angle - 0.42)),
+            QPointF(ex - head * math.cos(angle + 0.42),
+                    ey - head * math.sin(angle + 0.42)),
         ])
         p.setPen(Qt.NoPen)
-        p.setBrush(QBrush(QColor(250, 204, 21)))
+        p.setBrush(QBrush(QColor(56, 220, 180, 230)))
         p.drawPolygon(pts)
 
 
@@ -322,7 +350,7 @@ class ControlPanel(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
-        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WA_TranslucentBackground)  # fondo transparente real
         self.setFixedWidth(420)
         self.setStyleSheet(self._stylesheet())
         self._drag_pos = None
@@ -334,35 +362,45 @@ class ControlPanel(QWidget):
     def _stylesheet(self):
         return """
         QWidget#panel {
-            background:#111827;
-            border:2px solid #22c55e;
-            border-radius:16px;
+            background: rgba(8, 12, 28, 215);
+            border: 1px solid rgba(56, 220, 180, 160);
+            border-radius: 18px;
         }
-        QLabel { background:transparent; }
-        QLabel#title_lbl  { color:#22c55e; }
-        QLabel#step_lbl   { color:#86efac; }
-        QLabel#instr_lbl  { color:#f9fafb; }
-        QLabel#status_lbl { color:#6b7280; }
+        QWidget { background: transparent; }
+        QLabel  { background: transparent; }
+        QLabel#title_lbl  { color: rgba(56, 220, 180, 255); }
+        QLabel#step_lbl   { color: rgba(130, 230, 200, 255); }
+        QLabel#instr_lbl  { color: #f0f4ff; }
+        QLabel#status_lbl { color: rgba(150, 160, 180, 200); }
         QTextEdit {
-            background:#1f2937; color:#d1d5db;
-            border:1px solid #374151; border-radius:8px; padding:6px;
+            background: rgba(255, 255, 255, 18);
+            color: #c8d0e0;
+            border: 1px solid rgba(255,255,255,25);
+            border-radius: 8px;
+            padding: 6px;
         }
         QLineEdit {
-            background:#1f2937; color:#f9fafb;
-            border:2px solid #374151; border-radius:8px; padding:10px;
-            font-size:14px;
+            background: rgba(255, 255, 255, 18);
+            color: #f0f4ff;
+            border: 1px solid rgba(56, 220, 180, 100);
+            border-radius: 8px;
+            padding: 10px;
+            font-size: 14px;
         }
-        QLineEdit:focus { border-color:#22c55e; }
+        QLineEdit:focus { border: 1px solid rgba(56, 220, 180, 255); }
         QPushButton {
-            background:#22c55e; color:#111827; border:none;
-            border-radius:8px; padding:10px 16px; font-weight:bold;
+            background: rgba(56, 220, 180, 200);
+            color: #080c1c;
+            border: none;
+            border-radius: 8px;
+            padding: 10px 16px;
+            font-weight: bold;
         }
-        QPushButton:hover    { background:#16a34a; }
-        QPushButton:disabled { background:#374151; color:#6b7280; }
-        QPushButton#btn_sec {
-            background:#374151; color:#d1d5db;
-        }
-        QPushButton#btn_sec:hover { background:#4b5563; }
+        QPushButton:hover    { background: rgba(56, 220, 180, 255); }
+        QPushButton:disabled { background: rgba(255,255,255,30); color: rgba(200,200,200,120); }
+        QPushButton#btn_sec  { background: rgba(255,255,255,30); color: #c8d0e0; }
+        QPushButton#btn_sec:hover { background: rgba(255,255,255,50); }
+        QFrame { background: rgba(255,255,255,20); }
         """
 
     # ── Construcción de UI ────────────────────────────────────────────────────
@@ -548,18 +586,40 @@ class AICoach:
         self._busy   = False
         self._lock   = threading.Lock()
 
+    def _draw_coord_grid(self, img: Image.Image, phys_w: int, phys_h: int):
+        """Dibuja cuadrícula de coordenadas sobre el screenshot para que Claude pueda leer posiciones exactas."""
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(img, "RGBA")
+        step = 200  # línea cada 200px reales
+
+        for x in range(0, phys_w, step):
+            draw.line([(x, 0), (x, phys_h)], fill=(255, 60, 60, 55), width=1)
+            draw.text((x + 3, 3),  str(x), fill=(255, 60, 60, 220))
+            draw.text((x + 3, phys_h - 16), str(x), fill=(255, 60, 60, 180))
+
+        for y in range(0, phys_h, step):
+            draw.line([(0, y), (phys_w, y)], fill=(255, 60, 60, 55), width=1)
+            draw.text((3, y + 3), str(y), fill=(255, 60, 60, 220))
+            draw.text((phys_w - 46, y + 3), str(y), fill=(255, 60, 60, 180))
+
     def _capture(self) -> tuple[str, int, int]:
-        """Captura pantalla completa, devuelve (base64_jpeg, width, height)."""
+        """Captura pantalla con cuadrícula de coordenadas. Devuelve (base64_jpeg, phys_w, phys_h)."""
         with mss.mss() as sct:
             mon = sct.monitors[1]
-            w, h = mon["width"], mon["height"]
+            phys_w, phys_h = mon["width"], mon["height"]
             shot = sct.grab(mon)
             img  = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-            # Reducir a máx 1600px para ahorrar tokens, pero mantener aspecto
-            img.thumbnail((1600, 1600), Image.LANCZOS)
+
+            # Añadir cuadrícula ANTES de escalar: Claude lee números reales
+            self._draw_coord_grid(img, phys_w, phys_h)
+
+            # Escalar solo si supera 1920px (para reducir tokens sin perder legibilidad)
+            if phys_w > 1920:
+                img.thumbnail((1920, 1920), Image.LANCZOS)
+
             buf = BytesIO()
-            img.save(buf, format="JPEG", quality=80)
-            return base64.b64encode(buf.getvalue()).decode(), w, h
+            img.save(buf, format="JPEG", quality=85)
+            return base64.b64encode(buf.getvalue()).decode(), phys_w, phys_h
 
     def generate_plan(self, goal: str):
         """Genera el plan paso a paso. No bloquea."""
@@ -717,12 +777,20 @@ class TutorialApp:
 
     # ── Navegación de pasos ───────────────────────────────────────────────────
     def _show_step(self, idx: int):
-        step = self._steps[idx]
+        step  = self._steps[idx]
         total = len(self._steps)
 
-        self.overlay.set_step(step, total)
+        # Claude devuelve coordenadas físicas; Qt dibuja en lógicas.
+        # devicePixelRatio() == 1.5 en monitores con 150% DPI, etc.
+        dpi = QApplication.primaryScreen().devicePixelRatio()
+        logical_x = int(step["target_x"] / dpi)
+        logical_y = int(step["target_y"] / dpi)
+
+        display_step = dict(step, target_x=logical_x, target_y=logical_y)
+
+        self.overlay.set_step(display_step, total)
         self.panel.show_guide_mode(step, total)
-        self.monitor.set_target(step["target_x"], step["target_y"])
+        self.monitor.set_target(logical_x, logical_y)
         self._update_panel_rect()
         self.panel.set_status(f"Paso {step['n']} de {total}  •  activo")
 
