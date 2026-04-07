@@ -293,11 +293,24 @@ def main():
     except Exception:
         pass
 
-    # Calibrar coordenadas (físicas vs lógicas / DPI)
+    # Calibrar coordenadas con movimiento empírico de mouse
     try:
         cal = calibration.calibrate(app)
+        if not cal.get("ok", True):
+            from PyQt5.QtWidgets import QMessageBox
+            msg = QMessageBox()
+            msg.setWindowTitle("Tortuga — Aviso de calibración")
+            msg.setIcon(QMessageBox.Warning)
+            msg.setText(
+                f"⚠  La calibración detectó una discrepancia.\n\n"
+                f"Se esperaba mover {cal['expected']} px pero el mouse se movió "
+                f"{cal['delta_x']} px horizontal y {cal['delta_y']} px vertical.\n\n"
+                f"Las coordenadas pueden no ser exactas. "
+                f"Revisá la configuración de DPI de Windows."
+            )
+            msg.exec_()
     except Exception:
-        cal = {"scale_x": 1.0, "scale_y": 1.0}
+        cal = {"scale_x": 1.0, "scale_y": 1.0, "ok": False}
 
     # Pedir API keys
     dialog = APIKeyDialog()

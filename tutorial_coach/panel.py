@@ -21,8 +21,8 @@ QWidget#panel {
 }
 QWidget         { background: transparent; }
 QLabel          { background: transparent; color: #3c4043; }
-QLabel#title    { color: #1a73e8; }
-QLabel#step     { color: #1a73e8; }
+QLabel#title    { color: #00BCD4; }
+QLabel#step     { color: #00BCD4; }
 QLabel#instr    { color: #202124; }
 QLabel#status   { color: #9aa0a6; }
 QLabel#hint     { color: #9aa0a6; }
@@ -37,14 +37,14 @@ QLineEdit {
     border-radius: 2px; padding: 10px 16px;
 }
 QLineEdit:focus {
-    border: 2px solid #1a73e8;
+    border: 2px solid #00BCD4;
     background: rgba(255, 255, 255, 230);
 }
 QPushButton#primary {
     background: rgba(26, 115, 232, 235); color: white;
     border: none; border-radius: 2px; padding: 10px 20px;
 }
-QPushButton#primary:hover    { background: rgba(21, 87, 176, 250); }
+QPushButton#primary:hover    { background: rgba(0, 151, 167, 250); }
 QPushButton#primary:disabled { background: rgba(218, 220, 224, 180); color: #9aa0a6; }
 QPushButton#sec {
     background: rgba(255, 255, 255, 110); color: #5f6368;
@@ -72,14 +72,14 @@ QPushButton#tab_btn {
     border: none; border-radius: 0; padding: 8px 12px;
     border-bottom: 2px solid transparent;
 }
-QPushButton#tab_btn:hover { color: #1a73e8; }
+QPushButton#tab_btn:hover { color: #00BCD4; }
 QFrame#line { background: rgba(218, 220, 224, 140); }
 QCheckBox { color: #3c4043; background: transparent; }
 QSlider::groove:horizontal {
     background: rgba(218, 220, 224, 180); height: 4px; border-radius: 2px;
 }
 QSlider::handle:horizontal {
-    background: #1a73e8; width: 16px; height: 16px;
+    background: #00BCD4; width: 16px; height: 16px;
     margin: -6px 0; border-radius: 8px;
 }
 """
@@ -131,7 +131,7 @@ class ControlPanel(QWidget):
         hdr = QHBoxLayout()
         icon = QLabel("◉")
         icon.setFont(QFont(FONT, 16))
-        icon.setStyleSheet("color: #1a73e8; background: transparent;")
+        icon.setStyleSheet("color: #00BCD4; background: transparent;")
         hdr.addWidget(icon)
         t = QLabel("Tortuga")
         t.setObjectName("title"); t.setFont(QFont(FONT, 14, QFont.DemiBold))
@@ -195,7 +195,7 @@ class ControlPanel(QWidget):
         self._stack.setCurrentIndex(idx)
         for i, btn in enumerate(self._tab_btns):
             if i == idx:
-                btn.setStyleSheet("border-bottom: 2px solid #1a73e8; color: #1a73e8;")
+                btn.setStyleSheet("border-bottom: 2px solid #00BCD4; color: #00BCD4;")
             else:
                 btn.setStyleSheet("border-bottom: 2px solid transparent; color: #5f6368;")
         self.adjustSize()
@@ -426,7 +426,7 @@ class ControlPanel(QWidget):
         text = self.chat_input.text().strip()
         if not text:
             return
-        self.append_chat("Tú", text, "#1a73e8")
+        self.append_chat("Tú", text, "#00BCD4")
         self.chat_input.clear()
         self.set_busy(True)
         self.goal_submitted.emit(text)
