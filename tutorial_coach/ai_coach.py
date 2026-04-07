@@ -1,4 +1,10 @@
-"""Motor de IA: genera planes, verifica pasos, responde preguntas libres."""
+"""Motor de IA: genera planes, verifica pasos, responde preguntas libres.
+
+Diseño de hilos:
+  - capture_screen() siempre corre en el hilo principal (Qt).
+  - Solo la llamada a la API de Claude corre en el hilo de fondo.
+  Esto evita crasheos por acceder a widgets Qt desde hilos secundarios.
+"""
 import json
 import threading
 
@@ -35,7 +41,7 @@ class AICoach:
     def _call_claude(self, system: str, user_text: str,
                      image_b64: str | None = None,
                      max_tokens: int = 600) -> str:
-        """Llamada síncrona a Claude. Devuelve el texto de respuesta."""
+        """Llamada síncrona a Claude. Solo llamar desde hilo de fondo."""
         content = []
         if image_b64:
             content.append({
@@ -55,11 +61,10 @@ class AICoach:
         return resp.content[0].text.strip()
 
     def _parse_json(self, raw: str) -> dict:
-        """Extrae JSON de una respuesta que puede tener texto extra."""
         start = raw.find("{")
         end   = raw.rfind("}") + 1
         if start == -1 or end == 0:
-            raise ValueError(f"No se encontró JSON en la respuesta: {raw[:100]}")
+            raise ValueError(f"No se encontró JSON: {raw[:120]}")
         return json.loads(raw[start:end])
 
     def _bg(self, fn):
@@ -68,23 +73,35 @@ class AICoach:
 
     # ── Generar plan ───────────────────────────────────────────────────────────
     def generate_plan(self, goal: str):
-        """Captura pantalla, genera plan paso a paso. No bloquea."""
+        """Captura pantalla (hilo principal) → llama a Claude (hilo de fondo)."""
         if self._is_busy():
             return
         self.goal = goal
 
+        # ── CAPTURA en hilo principal (seguro para Qt) ──────────────────────
+        try:
+            self.signals.status_changed.emit("Capturando pantalla…")
+            img, pw, ph = capture_screen(with_grid=True)
+        except Exception as e:
+            self._release()
+            self.signals.error_occurred.emit(f"Error capturando pantalla: {e}")
+            return
+
+        # ── CLAUDE en hilo de fondo (solo red, sin Qt) ──────────────────────
         def _run():
             try:
-                self.signals.status_changed.emit("Analizando pantalla…")
-                img, w, h, _ = capture_screen(with_grid=True)
-                prompt = PLAN_USER.format(goal=goal, w=w, h=h, grid=GRID_STEP)
+                self.signals.status_changed.emit("Analizando con IA…")
+                prompt = PLAN_USER.format(goal=goal, w=pw, h=ph, grid=GRID_STEP)
                 raw    = self._call_claude(PLAN_SYSTEM, prompt, img, max_tokens=800)
-                plan   = self._parse_json(raw)
+
+                # Liberar memoria de la imagen lo antes posible
+                del img
+
+                plan = self._parse_json(raw)
 
                 if "steps" not in plan or not plan["steps"]:
                     raise ValueError("El plan no contiene pasos.")
 
-                # Asegurar campos opcionales con defaults
                 for s in plan["steps"]:
                     s.setdefault("region_w", 100)
                     s.setdefault("region_h", 40)
@@ -95,10 +112,9 @@ class AICoach:
 
             except anthropic.AuthenticationError:
                 self.signals.error_occurred.emit(
-                    "API key inválida. Reinicia el programa con una clave correcta.")
+                    "API key inválida. Reinicia el programa con la clave correcta.")
             except json.JSONDecodeError as e:
-                self.signals.error_occurred.emit(
-                    f"Error leyendo respuesta de IA: {e}")
+                self.signals.error_occurred.emit(f"Error leyendo respuesta de IA: {e}")
             except Exception as e:
                 self.signals.error_occurred.emit(f"Error: {e}")
             finally:
@@ -108,14 +124,20 @@ class AICoach:
 
     # ── Verificar paso completado ──────────────────────────────────────────────
     def verify_step(self, step: dict):
-        """Re-captura la pantalla y pregunta a Claude si el paso se completó."""
+        """Captura (hilo principal) → pregunta a Claude (hilo de fondo)."""
         if self._is_busy():
+            return
+
+        try:
+            img, pw, ph = capture_screen(with_grid=False)
+        except Exception:
+            self._release()
+            self.signals.verify_result.emit({"completed": True, "feedback": ""})
             return
 
         def _run():
             try:
                 self.signals.status_changed.emit("Verificando…")
-                img, w, h, _ = capture_screen(with_grid=False)
                 prompt = VERIFY_PROMPT.format(
                     goal=self.goal,
                     n=step["n"],
@@ -123,15 +145,13 @@ class AICoach:
                     element=step.get("element", ""),
                 )
                 raw    = self._call_claude(PLAN_SYSTEM, prompt, img, max_tokens=200)
+                del img
                 result = self._parse_json(raw)
                 result.setdefault("completed", False)
                 result.setdefault("feedback", "")
                 self.signals.verify_result.emit(result)
-            except Exception as e:
-                self.signals.verify_result.emit({
-                    "completed": True,
-                    "feedback": "",
-                })
+            except Exception:
+                self.signals.verify_result.emit({"completed": True, "feedback": ""})
             finally:
                 self._release()
 
@@ -139,17 +159,23 @@ class AICoach:
 
     # ── Pregunta libre ─────────────────────────────────────────────────────────
     def ask_free(self, question: str, mouse_x: int = 0, mouse_y: int = 0):
-        """Responde una pregunta del usuario sobre la pantalla actual."""
         if self._is_busy():
+            return
+
+        try:
+            img, _, _ = capture_screen(with_grid=False)
+        except Exception as e:
+            self._release()
+            self.signals.error_occurred.emit(f"Error capturando: {e}")
             return
 
         def _run():
             try:
                 self.signals.status_changed.emit("Pensando…")
-                img, _, _, _ = capture_screen(with_grid=False)
                 prompt = FREEQ_PROMPT.format(
                     question=question, mx=mouse_x, my=mouse_y)
                 answer = self._call_claude(PLAN_SYSTEM, prompt, img, max_tokens=300)
+                del img
                 self.signals.free_answer.emit(answer)
                 self.signals.status_changed.emit("Listo")
             except Exception as e:
@@ -161,15 +187,21 @@ class AICoach:
 
     # ── ¿Dónde estoy? ─────────────────────────────────────────────────────────
     def where_am_i(self):
-        """Explica qué hay en pantalla ahora mismo."""
         if self._is_busy():
+            return
+
+        try:
+            img, _, _ = capture_screen(with_grid=False)
+        except Exception as e:
+            self._release()
+            self.signals.error_occurred.emit(f"Error capturando: {e}")
             return
 
         def _run():
             try:
                 self.signals.status_changed.emit("Mirando tu pantalla…")
-                img, _, _, _ = capture_screen(with_grid=False)
                 answer = self._call_claude(PLAN_SYSTEM, WHERE_PROMPT, img, 250)
+                del img
                 self.signals.free_answer.emit(answer)
                 self.signals.status_changed.emit("Listo")
             except Exception as e:

@@ -19,21 +19,21 @@ def register_widgets(*widgets):
 
 
 def _hide_widgets():
+    """Oculta widgets antes de capturar. LLAMAR SOLO DESDE HILO PRINCIPAL."""
     from PyQt5.QtWidgets import QApplication
     for w in _widgets_to_hide:
         w.hide()
-    QApplication.processEvents()
-    time.sleep(0.08)  # Windows necesita un momento para redibujar
+    QApplication.processEvents()   # procesar repintado antes de capturar
+    time.sleep(0.08)               # Windows necesita tiempo extra para recomponer
 
 
 def _show_widgets():
-    from PyQt5.QtWidgets import QApplication
+    """Restaura widgets después de capturar. LLAMAR SOLO DESDE HILO PRINCIPAL."""
     for w in _widgets_to_hide:
         if hasattr(w, "showFullScreen"):
             w.showFullScreen()
         else:
             w.show()
-    QApplication.processEvents()
 
 
 def _draw_grid(img: Image.Image, w: int, h: int, step: int = GRID_STEP):
