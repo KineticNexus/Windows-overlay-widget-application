@@ -18,7 +18,6 @@ PyInstaller.__main__.run([
     # Ocultar consola en Windows
     "--noconsole",
     # Optimizar
-    "--strip",
     "--noupx",
     # Limpiar build anterior
     "--clean",
