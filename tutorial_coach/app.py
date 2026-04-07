@@ -4,7 +4,7 @@ import sys
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtWidgets import QApplication, QDialog
 
-from tutorial_coach.config import VERIFY_DELAY_MS, load_profile
+from tutorial_coach.config import VERIFY_DELAY_MS, load_profile, save_profile
 from tutorial_coach.signals import Signals
 from tutorial_coach.ai_coach import AICoach
 from tutorial_coach.overlay import AnnotationOverlay
@@ -12,11 +12,11 @@ from tutorial_coach.panel import ControlPanel
 from tutorial_coach.monitors import ClickMonitor, HotkeyMonitor
 from tutorial_coach.recorder import TutorialRecorder
 from tutorial_coach.dialogs import APIKeyDialog
-from tutorial_coach import voice, memory
+from tutorial_coach import voice, memory, capture, calibration
 
 
 class TutorialApp:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, deepgram_key: str = "", cal: dict = None):
         self.signals  = Signals()
         self.profile  = load_profile()
         self.coach    = AICoach(api_key, self.signals)
@@ -25,6 +25,18 @@ class TutorialApp:
         self.clicker  = ClickMonitor(on_hit=self._on_target_click)
         self.hotkeys  = HotkeyMonitor(on_hotkey=self._on_hotkey)
         self.recorder = TutorialRecorder(on_step_recorded=self._on_recorded_step)
+
+        # Calibración DPI: escala física→lógica
+        self._cal = cal or {"scale_x": 1.0, "scale_y": 1.0}
+
+        # Deepgram
+        if deepgram_key:
+            voice.set_deepgram_key(deepgram_key)
+            self.profile["deepgram_key"] = deepgram_key
+            save_profile(self.profile)
+
+        # Ocultar widgets durante capturas de pantalla
+        capture.register_widgets(self.overlay, self.panel)
 
         self._steps:   list = []
         self._current: int  = 0
@@ -55,6 +67,7 @@ class TutorialApp:
         p.mic_clicked.connect(self._toggle_mic)
         p.help_clicked.connect(self._on_help)
         p.profile_saved.connect(self._on_profile_saved)
+        p.close_clicked.connect(self._quit)
 
     # ── Arranque ──────────────────────────────────────────────────────────────
     def run(self):
@@ -63,6 +76,11 @@ class TutorialApp:
         self.clicker.start()
         self.hotkeys.start()
         self._sync_panel_rect()
+
+    def _quit(self):
+        self.clicker.stop()
+        self.hotkeys.stop()
+        QApplication.quit()
 
     def _sync_panel_rect(self):
         self.clicker.set_panel_rect(*self.panel.get_rect())
@@ -95,9 +113,8 @@ class TutorialApp:
         self.panel.append_chat(
             "Asistente",
             f"Plan: «{title}» — {len(self._steps)} pasos.",
-            "#60a5fa")
+            "#1a73e8")
 
-        # Guardar sesión
         try:
             self._session_id = memory.save_session(
                 self.coach.goal, plan, completed=False)
@@ -111,21 +128,20 @@ class TutorialApp:
         step  = self._steps[idx]
         total = len(self._steps)
 
-        # Convertir coordenadas físicas → lógicas (DPI)
-        from tutorial_coach.capture import get_dpi_scale
-        dpi = get_dpi_scale()
+        # Convertir coordenadas físicas → lógicas usando calibración
+        sx = self._cal.get("scale_x", 1.0)
+        sy = self._cal.get("scale_y", 1.0)
         display = dict(step,
-                       target_x=int(step["target_x"] / dpi),
-                       target_y=int(step["target_y"] / dpi),
-                       region_w=int(step.get("region_w", 100) / dpi),
-                       region_h=int(step.get("region_h", 40) / dpi))
+                       target_x=int(step["target_x"] / sx),
+                       target_y=int(step["target_y"] / sy),
+                       region_w=int(step.get("region_w", 100) / sx),
+                       region_h=int(step.get("region_h", 40) / sy))
 
         self.overlay.set_step(display, total)
         self.panel.show_guide_mode(step, total)
         self.clicker.set_target(display["target_x"], display["target_y"])
         self._sync_panel_rect()
 
-        # TTS
         if self.profile.get("voice_enabled", True):
             voice.speak(step["instruction"])
 
@@ -209,7 +225,7 @@ class TutorialApp:
         self._mic_active = False
         self.panel.set_mic_state("idle")
         self.panel.chat_input.setText(text)
-        self.panel.append_chat("Tú (voz)", text, "#86efac")
+        self.panel.append_chat("Tú (voz)", text, "#34a853")
         self.panel.set_busy(True)
         self.coach.generate_plan(text)
 
@@ -240,14 +256,14 @@ class TutorialApp:
 
     # ── Respuesta libre ───────────────────────────────────────────────────────
     def _on_free_answer(self, text: str):
-        self.panel.append_chat("Asistente", text, "#60a5fa")
+        self.panel.append_chat("Asistente", text, "#1a73e8")
         if self.profile.get("voice_enabled"):
             voice.speak(text)
 
     # ── Errores ───────────────────────────────────────────────────────────────
     def _on_error(self, msg: str):
         self.panel.set_busy(False)
-        self.panel.append_chat("⚠ Error", msg, "#f87171")
+        self.panel.append_chat("⚠ Error", msg, "#ea4335")
         self.panel.set_status("Error")
 
     # ── Recorder ──────────────────────────────────────────────────────────────
@@ -257,10 +273,11 @@ class TutorialApp:
     # ── Configuración ─────────────────────────────────────────────────────────
     def _on_profile_saved(self, profile: dict):
         self.profile = profile
+        if profile.get("deepgram_key"):
+            voice.set_deepgram_key(profile["deepgram_key"])
         if "font_size" in profile:
-            self.panel.instr_lbl.setFont(
-                __import__("PyQt5.QtGui", fromlist=["QFont"]).QFont(
-                    "Arial", profile["font_size"], 75))
+            from PyQt5.QtGui import QFont
+            self.panel.instr_lbl.setFont(QFont("Segoe UI", profile["font_size"], QFont.Bold))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -276,13 +293,22 @@ def main():
     except Exception:
         pass
 
-    # Pedir API key
+    # Calibrar coordenadas (físicas vs lógicas / DPI)
+    try:
+        cal = calibration.calibrate(app)
+    except Exception:
+        cal = {"scale_x": 1.0, "scale_y": 1.0}
+
+    # Pedir API keys
     dialog = APIKeyDialog()
     if dialog.exec_() != QDialog.Accepted:
         sys.exit(0)
 
+    api_key      = dialog.get_key()
+    deepgram_key = dialog.get_deepgram_key()
+
     # Lanzar
-    tutorial = TutorialApp(dialog.get_key())
+    tutorial = TutorialApp(api_key, deepgram_key=deepgram_key, cal=cal)
     tutorial.run()
 
     sys.exit(app.exec_())

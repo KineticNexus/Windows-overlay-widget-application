@@ -1,11 +1,39 @@
 """Captura de pantalla con cuadrícula de coordenadas para Claude."""
 import base64
+import time
 from io import BytesIO
 
 import mss
 from PIL import Image, ImageDraw, ImageFont
 
 from tutorial_coach.config import GRID_STEP
+
+# Referencia a los widgets para ocultarlos durante la captura
+_widgets_to_hide = []
+
+
+def register_widgets(*widgets):
+    """Registra widgets que deben ocultarse antes de capturar."""
+    _widgets_to_hide.clear()
+    _widgets_to_hide.extend(widgets)
+
+
+def _hide_widgets():
+    from PyQt5.QtWidgets import QApplication
+    for w in _widgets_to_hide:
+        w.hide()
+    QApplication.processEvents()
+    time.sleep(0.08)  # Windows necesita un momento para redibujar
+
+
+def _show_widgets():
+    from PyQt5.QtWidgets import QApplication
+    for w in _widgets_to_hide:
+        if hasattr(w, "showFullScreen"):
+            w.showFullScreen()
+        else:
+            w.show()
+    QApplication.processEvents()
 
 
 def _draw_grid(img: Image.Image, w: int, h: int, step: int = GRID_STEP):
@@ -27,38 +55,29 @@ def _draw_grid(img: Image.Image, w: int, h: int, step: int = GRID_STEP):
         draw.text((w - 50, y + 3), str(y), fill=(255, 60, 60, 160), font=font)
 
 
-def get_dpi_scale() -> float:
-    """Devuelve el factor de escala DPI del monitor primario."""
-    try:
-        from PyQt5.QtWidgets import QApplication
-        screen = QApplication.primaryScreen()
-        if screen:
-            return screen.devicePixelRatio()
-    except Exception:
-        pass
-    return 1.0
-
-
 def capture_screen(with_grid: bool = True) -> tuple:
     """
-    Captura la pantalla principal.
+    Oculta widgets, captura la pantalla, restaura widgets.
 
     Returns:
-        (base64_jpeg, physical_width, physical_height, dpi_scale)
+        (base64_jpeg, physical_width, physical_height)
     """
-    with mss.mss() as sct:
-        mon = sct.monitors[1]
-        pw, ph = mon["width"], mon["height"]
-        shot = sct.grab(mon)
-        img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+    _hide_widgets()
+    try:
+        with mss.mss() as sct:
+            mon = sct.monitors[1]
+            pw, ph = mon["width"], mon["height"]
+            shot = sct.grab(mon)
+            img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+    finally:
+        _show_widgets()
 
     if with_grid:
         _draw_grid(img, pw, ph)
 
-    # Solo escalar si supera 1920px (reducir tokens, mantener legibilidad)
     if pw > 1920:
         img.thumbnail((1920, 1920), Image.LANCZOS)
 
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=85)
-    return base64.b64encode(buf.getvalue()).decode(), pw, ph, get_dpi_scale()
+    return base64.b64encode(buf.getvalue()).decode(), pw, ph
