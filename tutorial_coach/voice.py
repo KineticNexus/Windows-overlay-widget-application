@@ -13,7 +13,7 @@ _deepgram_key = ""
 
 def set_deepgram_key(key: str):
     global _deepgram_key
-    _deepgram_key = key
+    _deepgram_key = key.strip()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -21,6 +21,8 @@ def set_deepgram_key(key: str):
 # ═══════════════════════════════════════════════════════════════════════════════
 def speak(text: str):
     """Lee texto en voz alta. No bloquea."""
+    if not text or not text.strip():
+        return
     threading.Thread(target=lambda: _speak_sync(text), daemon=True).start()
 
 
@@ -69,9 +71,12 @@ def _speak_pyttsx3(text: str):
         import pyttsx3
         engine = pyttsx3.init()
         engine.setProperty("rate", 160)
-        for v in engine.getProperty("voices"):
-            if "spanish" in v.name.lower() or "es" in v.id.lower():
-                engine.setProperty("voice", v.id)
+        voices = engine.getProperty("voices") or []
+        for v in voices:
+            name = getattr(v, "name", "") or ""
+            vid  = getattr(v, "id", "")  or ""
+            if "spanish" in name.lower() or "es" in vid.lower():
+                engine.setProperty("voice", vid)
                 break
         engine.say(text)
         engine.runAndWait()
@@ -91,31 +96,33 @@ def listen(signals: Signals, timeout: int = 8):
 def _listen_sync(signals: Signals, timeout: int):
     signals.voice_status.emit("recording")
 
-    # Grabar audio con pyaudio
     try:
         audio_wav = _record_mic(timeout)
     except Exception as e:
-        signals.voice_status.emit(f"error:Micrófono: {e}")
+        signals.voice_status.emit(f"error:Micrófono no disponible: {e}")
         return
 
     signals.voice_status.emit("processing")
 
-    # Transcribir
+    # Intentar Deepgram primero
     if _deepgram_key:
         try:
             text = _stt_deepgram(audio_wav)
-            if text:
-                signals.voice_text_ready.emit(text)
+            if text and text.strip():
+                signals.voice_text_ready.emit(text.strip())
                 signals.voice_status.emit("idle")
                 return
         except Exception:
             pass
 
-    # Fallback a Google
+    # Fallback Google
     try:
         text = _stt_google(audio_wav)
-        signals.voice_text_ready.emit(text)
-        signals.voice_status.emit("idle")
+        if text and text.strip():
+            signals.voice_text_ready.emit(text.strip())
+            signals.voice_status.emit("idle")
+        else:
+            signals.voice_status.emit("error:No escuché nada. Intenta de nuevo.")
     except Exception as e:
         signals.voice_status.emit(f"error:{str(e)[:80]}")
 
@@ -124,28 +131,31 @@ def _record_mic(duration: int = 8) -> bytes:
     """Graba audio del micrófono y devuelve bytes WAV."""
     import pyaudio
 
-    RATE = 16000
-    CHUNK = 1024
-    FORMAT = pyaudio.paInt16
+    RATE     = 16000
+    CHUNK    = 1024
+    FORMAT   = pyaudio.paInt16
     CHANNELS = 1
 
     p = pyaudio.PyAudio()
+    # Obtener sample size ANTES de terminate()
+    sample_width = p.get_sample_size(FORMAT)
+
     stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE,
                     input=True, frames_per_buffer=CHUNK)
-
     frames = []
-    for _ in range(int(RATE / CHUNK * duration)):
-        data = stream.read(CHUNK, exception_on_overflow=False)
-        frames.append(data)
-
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
+    try:
+        for _ in range(int(RATE / CHUNK * duration)):
+            data = stream.read(CHUNK, exception_on_overflow=False)
+            frames.append(data)
+    finally:
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
 
     buf = io.BytesIO()
     wf = wave.open(buf, "wb")
     wf.setnchannels(CHANNELS)
-    wf.setsampwidth(p.get_sample_size(FORMAT))
+    wf.setsampwidth(sample_width)
     wf.setframerate(RATE)
     wf.writeframes(b"".join(frames))
     wf.close()
@@ -166,7 +176,16 @@ def _stt_deepgram(audio_wav: bytes) -> str:
     )
     resp.raise_for_status()
     data = resp.json()
-    return data["results"]["channels"][0]["alternatives"][0]["transcript"]
+
+    # Acceso seguro a la estructura de respuesta
+    try:
+        transcript = (data.get("results", {})
+                          .get("channels", [{}])[0]
+                          .get("alternatives", [{}])[0]
+                          .get("transcript", ""))
+        return transcript
+    except (IndexError, AttributeError, TypeError):
+        return ""
 
 
 def _stt_google(audio_wav: bytes) -> str:
@@ -174,5 +193,6 @@ def _stt_google(audio_wav: bytes) -> str:
     import speech_recognition as sr
 
     recognizer = sr.Recognizer()
-    audio = sr.AudioData(audio_wav[44:], 16000, 2)  # skip WAV header
+    # WAV estándar: header de 44 bytes, mono 16-bit 16kHz
+    audio = sr.AudioData(audio_wav[44:], 16000, 2)
     return recognizer.recognize_google(audio, language="es-ES")

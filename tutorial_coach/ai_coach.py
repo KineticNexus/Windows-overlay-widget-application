@@ -3,7 +3,8 @@
 Diseño de hilos:
   - capture_screen() siempre corre en el hilo principal (Qt).
   - Solo la llamada a la API de Claude corre en el hilo de fondo.
-  Esto evita crasheos por acceder a widgets Qt desde hilos secundarios.
+  - PyQt5 signals emitidos desde hilos secundarios son thread-safe (conexiones
+    queued): el slot se ejecuta en el hilo principal via el event loop.
 """
 import json
 import threading
@@ -68,7 +69,6 @@ class AICoach:
         return json.loads(raw[start:end])
 
     def _bg(self, fn):
-        """Ejecuta fn en un hilo daemon."""
         threading.Thread(target=fn, daemon=True).start()
 
     # ── Generar plan ───────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ class AICoach:
             return
         self.goal = goal
 
-        # ── CAPTURA en hilo principal (seguro para Qt) ──────────────────────
+        # CAPTURA en hilo principal (seguro para Qt)
         try:
             self.signals.status_changed.emit("Capturando pantalla…")
             img, pw, ph = capture_screen(with_grid=True)
@@ -87,17 +87,14 @@ class AICoach:
             self.signals.error_occurred.emit(f"Error capturando pantalla: {e}")
             return
 
-        # ── CLAUDE en hilo de fondo (solo red, sin Qt) ──────────────────────
+        # CLAUDE en hilo de fondo — NO usar del img aquí: Python marcaría
+        # img como variable local del closure y causaría UnboundLocalError
         def _run():
             try:
                 self.signals.status_changed.emit("Analizando con IA…")
                 prompt = PLAN_USER.format(goal=goal, w=pw, h=ph, grid=GRID_STEP)
                 raw    = self._call_claude(PLAN_SYSTEM, prompt, img, max_tokens=800)
-
-                # Liberar memoria de la imagen lo antes posible
-                del img
-
-                plan = self._parse_json(raw)
+                plan   = self._parse_json(raw)
 
                 if "steps" not in plan or not plan["steps"]:
                     raise ValueError("El plan no contiene pasos.")
@@ -145,7 +142,6 @@ class AICoach:
                     element=step.get("element", ""),
                 )
                 raw    = self._call_claude(PLAN_SYSTEM, prompt, img, max_tokens=200)
-                del img
                 result = self._parse_json(raw)
                 result.setdefault("completed", False)
                 result.setdefault("feedback", "")
@@ -175,7 +171,6 @@ class AICoach:
                 prompt = FREEQ_PROMPT.format(
                     question=question, mx=mouse_x, my=mouse_y)
                 answer = self._call_claude(PLAN_SYSTEM, prompt, img, max_tokens=300)
-                del img
                 self.signals.free_answer.emit(answer)
                 self.signals.status_changed.emit("Listo")
             except Exception as e:
@@ -201,7 +196,6 @@ class AICoach:
             try:
                 self.signals.status_changed.emit("Mirando tu pantalla…")
                 answer = self._call_claude(PLAN_SYSTEM, WHERE_PROMPT, img, 250)
-                del img
                 self.signals.free_answer.emit(answer)
                 self.signals.status_changed.emit("Listo")
             except Exception as e:
