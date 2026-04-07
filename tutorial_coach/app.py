@@ -113,7 +113,7 @@ class TutorialApp:
         self.panel.append_chat(
             "Asistente",
             f"Plan: «{title}» — {len(self._steps)} pasos.",
-            "#1a73e8")
+            "#00BCD4")
 
         try:
             self._session_id = memory.save_session(
@@ -128,14 +128,14 @@ class TutorialApp:
         step  = self._steps[idx]
         total = len(self._steps)
 
-        # Convertir coordenadas físicas → lógicas usando calibración
-        sx = self._cal.get("scale_x", 1.0)
-        sy = self._cal.get("scale_y", 1.0)
+        # Las coordenadas ya son lógicas (capture.py redimensiona a lógico
+        # antes del grid, Claude devuelve coords en ese espacio).
+        # No se necesita conversión.
         display = dict(step,
-                       target_x=int(step["target_x"] / sx),
-                       target_y=int(step["target_y"] / sy),
-                       region_w=int(step.get("region_w", 100) / sx),
-                       region_h=int(step.get("region_h", 40) / sy))
+                       target_x=int(step["target_x"]),
+                       target_y=int(step["target_y"]),
+                       region_w=int(step.get("region_w", 100)),
+                       region_h=int(step.get("region_h", 40)))
 
         self.overlay.set_step(display, total)
         self.panel.show_guide_mode(step, total)
@@ -293,20 +293,23 @@ def main():
     except Exception:
         pass
 
-    # Calibrar coordenadas con movimiento empírico de mouse
+    # Verificar características de pantalla
     try:
         cal = calibration.calibrate(app)
         if not cal.get("ok", True):
             from PyQt5.QtWidgets import QMessageBox
+            issues = "\n".join(f"• {i}" for i in cal.get("issues", []))
             msg = QMessageBox()
-            msg.setWindowTitle("Tortuga — Aviso de calibración")
+            msg.setWindowTitle("Tortuga — Aviso de pantalla")
             msg.setIcon(QMessageBox.Warning)
             msg.setText(
-                f"⚠  La calibración detectó una discrepancia.\n\n"
-                f"Se esperaba mover {cal['expected']} px pero el mouse se movió "
-                f"{cal['delta_x']} px horizontal y {cal['delta_y']} px vertical.\n\n"
-                f"Las coordenadas pueden no ser exactas. "
-                f"Revisá la configuración de DPI de Windows."
+                f"⚠  Se detectó inconsistencia en la configuración de pantalla.\n\n"
+                f"{issues}\n\n"
+                f"Pantalla: {cal.get('logical_w')}×{cal.get('logical_h')} lógico  |  "
+                f"{cal.get('physical_w')}×{cal.get('physical_h')} físico  |  "
+                f"DPI ratio: {cal.get('dpr')}\n\n"
+                f"Las anotaciones podrían no estar perfectamente alineadas.\n"
+                f"Recomendado: ajustar DPI de Windows a un valor entero (100%, 150%, 200%)."
             )
             msg.exec_()
     except Exception:

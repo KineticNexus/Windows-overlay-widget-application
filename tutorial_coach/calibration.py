@@ -1,85 +1,83 @@
 """
-Calibración empírica de pantalla por movimiento de mouse.
+Calibración de pantalla usando múltiples fuentes de datos:
+  1. Qt devicePixelRatio()       — razón DPI del sistema
+  2. mss                         — resolución física real
+  3. ctypes Win32 API            — DPI del sistema Windows
+  4. Verificación de consistencia entre fuentes
 
-Procedimiento:
-1. Registrar resolución física (mss) y lógica (Qt).
-2. Mover el mouse 200 unidades pynput en X y en Y.
-3. Medir cuántos pixels lógicos se desplazó realmente.
-4. Calcular escala física→lógica con corrección empírica.
-5. Si el mouse no llegó al lugar esperado, retornar ok=False.
+Con la nueva arquitectura (capture.py redimensiona a lógico antes del grid),
+scale_x / scale_y = 1.0 — no se necesita conversión de coordenadas.
+La calibración verifica que el sistema esté configurado correctamente.
 """
-import time
-
 import mss
-from pynput.mouse import Controller
 
 
 def calibrate(qt_app) -> dict:
-    """Retorna dict con scale_x, scale_y y campo 'ok'."""
-
-    # ── 1. Resoluciones ──────────────────────────────────────────────────────
-    with mss.mss() as sct:
-        mon       = sct.monitors[1]
-        phys_w    = mon["width"]
-        phys_h    = mon["height"]
-
+    """
+    Obtiene características reales de pantalla y verifica consistencia.
+    Retorna dict con info de pantalla y campo 'ok'.
+    """
+    # ── Fuente 1: Qt ─────────────────────────────────────────────────────────
     screen    = qt_app.primaryScreen()
+    dpr       = screen.devicePixelRatio()         # 1.0 / 1.25 / 1.5 / 2.0
     logical_w = screen.geometry().width()
     logical_h = screen.geometry().height()
+    phys_dpi  = screen.physicalDotsPerInch()
+    logic_dpi = screen.logicalDotsPerInch()
 
-    base_sx = phys_w / logical_w if logical_w > 0 else 1.0
-    base_sy = phys_h / logical_h if logical_h > 0 else 1.0
+    # ── Fuente 2: mss (píxeles físicos reales del hardware) ──────────────────
+    with mss.mss() as sct:
+        mon    = sct.monitors[1]
+        phys_w = mon["width"]
+        phys_h = mon["height"]
 
-    # ── 2. Mover mouse y medir desplazamiento real ───────────────────────────
-    mouse     = Controller()
-    MOVE      = 200     # unidades pynput a mover
-    TOLERANCE = 10      # error aceptable en pixels
+    # ── Fuente 3: Windows ctypes (DPI del sistema) ───────────────────────────
+    win_dpi   = None
+    win_scale = None
+    try:
+        import ctypes
+        # SetProcessDpiAwareness — asegura que obtenemos el DPI real
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
+        win_dpi   = ctypes.windll.user32.GetDpiForSystem()
+        win_scale = win_dpi / 96.0   # 96 DPI = escala 1.0 en Windows
+    except Exception:
+        pass
 
-    cx = logical_w // 2
-    cy = logical_h // 2
+    # ── Verificación de consistencia ─────────────────────────────────────────
+    # Las tres fuentes deben coincidir para coordenadas correctas
+    mss_scale_x = phys_w / logical_w if logical_w > 0 else 1.0
+    mss_scale_y = phys_h / logical_h if logical_h > 0 else 1.0
 
-    # Horizontal
-    mouse.position = (cx, cy)
-    time.sleep(0.25)
-    x0, _ = mouse.position
-    mouse.move(MOVE, 0)
-    time.sleep(0.25)
-    x1, _ = mouse.position
-    delta_x = x1 - x0
+    issues = []
+    if abs(mss_scale_x - dpr) > 0.15:
+        issues.append(f"mss/Qt X: {mss_scale_x:.3f} vs devicePixelRatio {dpr:.3f}")
+    if abs(mss_scale_y - dpr) > 0.15:
+        issues.append(f"mss/Qt Y: {mss_scale_y:.3f} vs devicePixelRatio {dpr:.3f}")
+    if win_scale is not None and abs(win_scale - dpr) > 0.15:
+        issues.append(f"Win32 DPI: {win_scale:.3f} vs Qt {dpr:.3f}")
 
-    # Vertical
-    mouse.position = (cx, cy)
-    time.sleep(0.25)
-    _, y0 = mouse.position
-    mouse.move(0, MOVE)
-    time.sleep(0.25)
-    _, y1 = mouse.position
-    delta_y = y1 - y0
-
-    # Volver al centro
-    mouse.position = (cx, cy)
-
-    # ── 3. Calcular escala real ───────────────────────────────────────────────
-    # Si pynput move(200,0) produjo menos de 200 pixels lógicos,
-    # hay una corrección necesaria (DPI fraccional, multi-monitor, etc.)
-    corr_x  = MOVE / delta_x if delta_x > 0 else 1.0
-    corr_y  = MOVE / delta_y if delta_y > 0 else 1.0
-
-    scale_x = round(base_sx * corr_x, 4)
-    scale_y = round(base_sy * corr_y, 4)
-
-    ok = (abs(delta_x - MOVE) <= TOLERANCE and
-          abs(delta_y - MOVE) <= TOLERANCE)
+    ok = len(issues) == 0
 
     return {
-        "scale_x":    scale_x,
-        "scale_y":    scale_y,
+        # Con la nueva arquitectura las imágenes se redimensionan a lógico
+        # antes de dibujar el grid → Claude siempre devuelve coords lógicas
+        "scale_x":    1.0,
+        "scale_y":    1.0,
+        # Info informativa
+        "dpr":        dpr,
         "physical_w": phys_w,
         "physical_h": phys_h,
         "logical_w":  logical_w,
         "logical_h":  logical_h,
+        "phys_dpi":   phys_dpi,
+        "logic_dpi":  logic_dpi,
+        "win_dpi":    win_dpi,
+        "win_scale":  win_scale,
+        "mss_scale_x": round(mss_scale_x, 4),
+        "mss_scale_y": round(mss_scale_y, 4),
         "ok":         ok,
-        "delta_x":    delta_x,
-        "delta_y":    delta_y,
-        "expected":   MOVE,
+        "issues":     issues,
     }
