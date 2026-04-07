@@ -71,7 +71,7 @@ class TutorialApp:
 
     # ── Arranque ──────────────────────────────────────────────────────────────
     def run(self):
-        self.overlay.showFullScreen()
+        self.overlay.show()   # geometría ya fijada en __init__, no showFullScreen
         self.panel.show()
         self.clicker.start()
         self.hotkeys.start()

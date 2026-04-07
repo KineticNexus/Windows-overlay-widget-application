@@ -15,9 +15,9 @@ FONT = "Segoe UI"
 # ── Stylesheet — limpio, claro, Material-like ─────────────────────────────────
 STYLE = """
 QWidget#panel {
-    background: rgba(255, 255, 255, 200);
-    border: 1px solid rgba(226, 226, 226, 160);
-    border-radius: 14px;
+    background: rgba(255, 255, 255, 210);
+    border: 1px solid rgba(218, 220, 224, 180);
+    border-radius: 2px;
 }
 QWidget         { background: transparent; }
 QLabel          { background: transparent; color: #3c4043; }
@@ -27,50 +27,53 @@ QLabel#instr    { color: #202124; }
 QLabel#status   { color: #9aa0a6; }
 QLabel#hint     { color: #9aa0a6; }
 QTextEdit {
-    background: rgba(248, 249, 250, 160); color: #3c4043;
+    background: rgba(248, 249, 250, 150); color: #3c4043;
     border: 1px solid rgba(218, 220, 224, 120);
-    border-radius: 8px; padding: 8px;
-    selection-background-color: rgba(26,115,232,0.2);
+    border-radius: 2px; padding: 8px;
 }
 QLineEdit {
-    background: rgba(248, 249, 250, 180); color: #202124;
+    background: rgba(248, 249, 250, 170); color: #202124;
     border: 1px solid rgba(218, 220, 224, 150);
-    border-radius: 24px; padding: 10px 16px;
+    border-radius: 2px; padding: 10px 16px;
 }
 QLineEdit:focus {
     border: 2px solid #1a73e8;
-    background: rgba(255, 255, 255, 220);
+    background: rgba(255, 255, 255, 230);
 }
 QPushButton#primary {
-    background: rgba(26, 115, 232, 230); color: white;
-    border: none; border-radius: 20px; padding: 10px 20px;
+    background: rgba(26, 115, 232, 235); color: white;
+    border: none; border-radius: 2px; padding: 10px 20px;
 }
-QPushButton#primary:hover { background: rgba(21, 87, 176, 240); }
+QPushButton#primary:hover    { background: rgba(21, 87, 176, 250); }
 QPushButton#primary:disabled { background: rgba(218, 220, 224, 180); color: #9aa0a6; }
 QPushButton#sec {
-    background: rgba(255,255,255,100); color: #5f6368;
-    border: 1px solid rgba(218, 220, 224, 140);
-    border-radius: 20px; padding: 8px 16px;
+    background: rgba(255, 255, 255, 110); color: #5f6368;
+    border: 1px solid rgba(218, 220, 224, 160);
+    border-radius: 2px; padding: 8px 16px;
 }
-QPushButton#sec:hover { background: rgba(241, 243, 244, 180); }
+QPushButton#sec:hover { background: rgba(241, 243, 244, 200); }
 QPushButton#close_btn {
     background: transparent; color: #9aa0a6;
-    border: none; border-radius: 12px; padding: 2px;
+    border: none; border-radius: 2px; padding: 2px;
     font-size: 14px;
 }
-QPushButton#close_btn:hover { background: rgba(234, 67, 53, 30); color: #d93025; }
+QPushButton#close_btn:hover { background: rgba(234, 67, 53, 25); color: #d93025; }
 QPushButton#mic {
-    background: rgba(234, 67, 53, 210); color: white;
-    border: none; border-radius: 18px;
+    background: rgba(26, 115, 232, 220); color: white;
+    border: none; border-radius: 2px;
 }
-QPushButton#mic:hover { background: rgba(197, 34, 31, 230); }
+QPushButton#mic:hover { background: rgba(21, 87, 176, 240); }
+QPushButton#mic_rec {
+    background: rgba(234, 67, 53, 220); color: white;
+    border: none; border-radius: 2px;
+}
 QPushButton#tab_btn {
     background: transparent; color: #5f6368;
     border: none; border-radius: 0; padding: 8px 12px;
     border-bottom: 2px solid transparent;
 }
 QPushButton#tab_btn:hover { color: #1a73e8; }
-QFrame#line { background: rgba(232, 234, 237, 140); }
+QFrame#line { background: rgba(218, 220, 224, 140); }
 QCheckBox { color: #3c4043; background: transparent; }
 QSlider::groove:horizontal {
     background: rgba(218, 220, 224, 180); height: 4px; border-radius: 2px;
@@ -218,10 +221,11 @@ class ControlPanel(QWidget):
         self.chat_input.returnPressed.connect(self._on_send)
         row.addWidget(self.chat_input)
 
-        self.mic_btn = QPushButton("🎤")
+        self.mic_btn = QPushButton("\uE720")   # Segoe MDL2 Assets — micrófono
         self.mic_btn.setObjectName("mic")
-        self.mic_btn.setFixedSize(36, 36)
-        self.mic_btn.setToolTip("Hablar")
+        self.mic_btn.setFixedSize(38, 38)
+        self.mic_btn.setFont(QFont("Segoe MDL2 Assets", 15))
+        self.mic_btn.setToolTip("Hablar (mantené presionado y hablá)")
         self.mic_btn.clicked.connect(self.mic_clicked.emit)
         row.addWidget(self.mic_btn)
         l.addLayout(row)
@@ -400,12 +404,16 @@ class ControlPanel(QWidget):
 
     def set_mic_state(self, state: str):
         if state == "recording":
-            self.mic_btn.setText("■")
-            self.mic_btn.setStyleSheet(
-                "background: #d93025; color: white; border-radius: 18px;")
+            self.mic_btn.setObjectName("mic_rec")
+            self.mic_btn.setText("\uE73E")   # Stop / rec indicator
+            self.mic_btn.setFont(QFont("Segoe MDL2 Assets", 13))
         else:
-            self.mic_btn.setText("🎤")
-            self.mic_btn.setStyleSheet("")
+            self.mic_btn.setObjectName("mic")
+            self.mic_btn.setText("\uE720")   # Microphone
+            self.mic_btn.setFont(QFont("Segoe MDL2 Assets", 15))
+        # Forzar refresco de estilo
+        self.mic_btn.style().unpolish(self.mic_btn)
+        self.mic_btn.style().polish(self.mic_btn)
 
     def set_history(self, sessions: list):
         self.history_log.clear()
