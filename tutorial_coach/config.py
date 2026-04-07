@@ -35,6 +35,7 @@ DEFAULT_PROFILE = {
     "auto_verify": True,     # re-analizar pantalla tras avance
     "hotkey_help": "f1",     # tecla global "¿dónde estoy?"
     "language": "es",
+    "anthropic_key": "",     # Anthropic API key (guardada localmente)
     "deepgram_key": "",      # Deepgram API key (TTS+STT de alta calidad)
 }
 

@@ -15,9 +15,9 @@ FONT = "Segoe UI"
 # ── Stylesheet — limpio, claro, Material-like ─────────────────────────────────
 STYLE = """
 QWidget#panel {
-    background: rgba(255, 255, 255, 248);
-    border: 1px solid #e2e2e2;
-    border-radius: 12px;
+    background: rgba(255, 255, 255, 200);
+    border: 1px solid rgba(226, 226, 226, 160);
+    border-radius: 14px;
 }
 QWidget         { background: transparent; }
 QLabel          { background: transparent; color: #3c4043; }
@@ -27,45 +27,54 @@ QLabel#instr    { color: #202124; }
 QLabel#status   { color: #9aa0a6; }
 QLabel#hint     { color: #9aa0a6; }
 QTextEdit {
-    background: #f8f9fa; color: #3c4043;
-    border: 1px solid #dadce0; border-radius: 8px; padding: 8px;
+    background: rgba(248, 249, 250, 160); color: #3c4043;
+    border: 1px solid rgba(218, 220, 224, 120);
+    border-radius: 8px; padding: 8px;
     selection-background-color: rgba(26,115,232,0.2);
 }
 QLineEdit {
-    background: #f8f9fa; color: #202124;
-    border: 1px solid #dadce0; border-radius: 24px; padding: 10px 16px;
+    background: rgba(248, 249, 250, 180); color: #202124;
+    border: 1px solid rgba(218, 220, 224, 150);
+    border-radius: 24px; padding: 10px 16px;
 }
-QLineEdit:focus { border: 2px solid #1a73e8; background: #fff; }
+QLineEdit:focus {
+    border: 2px solid #1a73e8;
+    background: rgba(255, 255, 255, 220);
+}
 QPushButton#primary {
-    background: #1a73e8; color: white;
+    background: rgba(26, 115, 232, 230); color: white;
     border: none; border-radius: 20px; padding: 10px 20px;
 }
-QPushButton#primary:hover { background: #1557b0; }
-QPushButton#primary:disabled { background: #dadce0; color: #9aa0a6; }
+QPushButton#primary:hover { background: rgba(21, 87, 176, 240); }
+QPushButton#primary:disabled { background: rgba(218, 220, 224, 180); color: #9aa0a6; }
 QPushButton#sec {
-    background: transparent; color: #5f6368;
-    border: 1px solid #dadce0; border-radius: 20px; padding: 8px 16px;
+    background: rgba(255,255,255,100); color: #5f6368;
+    border: 1px solid rgba(218, 220, 224, 140);
+    border-radius: 20px; padding: 8px 16px;
 }
-QPushButton#sec:hover { background: #f1f3f4; }
+QPushButton#sec:hover { background: rgba(241, 243, 244, 180); }
 QPushButton#close_btn {
-    background: transparent; color: #5f6368;
+    background: transparent; color: #9aa0a6;
     border: none; border-radius: 12px; padding: 2px;
-    font-size: 16px;
+    font-size: 14px;
 }
-QPushButton#close_btn:hover { background: #f1f3f4; color: #d93025; }
+QPushButton#close_btn:hover { background: rgba(234, 67, 53, 30); color: #d93025; }
 QPushButton#mic {
-    background: #ea4335; color: white; border: none; border-radius: 18px;
+    background: rgba(234, 67, 53, 210); color: white;
+    border: none; border-radius: 18px;
 }
-QPushButton#mic:hover { background: #c5221f; }
+QPushButton#mic:hover { background: rgba(197, 34, 31, 230); }
 QPushButton#tab_btn {
     background: transparent; color: #5f6368;
     border: none; border-radius: 0; padding: 8px 12px;
     border-bottom: 2px solid transparent;
 }
 QPushButton#tab_btn:hover { color: #1a73e8; }
-QFrame#line { background: #e8eaed; }
+QFrame#line { background: rgba(232, 234, 237, 140); }
 QCheckBox { color: #3c4043; background: transparent; }
-QSlider::groove:horizontal { background: #dadce0; height: 4px; border-radius: 2px; }
+QSlider::groove:horizontal {
+    background: rgba(218, 220, 224, 180); height: 4px; border-radius: 2px;
+}
 QSlider::handle:horizontal {
     background: #1a73e8; width: 16px; height: 16px;
     margin: -6px 0; border-radius: 8px;
