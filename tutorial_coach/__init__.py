@@ -1,2 +1,2 @@
-"""AI Tutorial Coach — Guiado Visual Inteligente para Personas Mayores."""
-__version__ = "2.0.0"
+"""Tortuga — Guía visual inteligente para la computadora."""
+__version__ = "3.0.0"

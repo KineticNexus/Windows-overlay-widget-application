@@ -1,10 +1,9 @@
 """Motor de IA: genera planes, verifica pasos, responde preguntas libres.
 
-Diseño de hilos:
-  - capture_screen() siempre corre en el hilo principal (Qt).
-  - Solo la llamada a la API de Claude corre en el hilo de fondo.
-  - PyQt5 signals emitidos desde hilos secundarios son thread-safe (conexiones
-    queued): el slot se ejecuta en el hilo principal via el event loop.
+Threading:
+  - capture_screen() corre en hilo principal (Qt).
+  - Solo la llamada a Claude va al hilo de fondo.
+  - Signals PyQt5 cross-thread son thread-safe (queued connections).
 """
 import json
 import threading
@@ -41,8 +40,7 @@ class AICoach:
 
     def _call_claude(self, system: str, user_text: str,
                      image_b64: str | None = None,
-                     max_tokens: int = 600) -> str:
-        """Llamada síncrona a Claude. Solo llamar desde hilo de fondo."""
+                     max_tokens: int = 1024) -> str:
         content = []
         if image_b64:
             content.append({
@@ -52,7 +50,6 @@ class AICoach:
                            "data": image_b64},
             })
         content.append({"type": "text", "text": user_text})
-
         resp = self.client.messages.create(
             model=MODEL,
             max_tokens=max_tokens,
@@ -62,23 +59,60 @@ class AICoach:
         return resp.content[0].text.strip()
 
     def _parse_json(self, raw: str) -> dict:
+        """Extrae JSON robusto: intenta múltiples estrategias antes de fallar."""
+        # Estrategia 1: texto directo
+        try:
+            return json.loads(raw.strip())
+        except json.JSONDecodeError:
+            pass
+
+        # Estrategia 2: primer { hasta último }
         start = raw.find("{")
         end   = raw.rfind("}") + 1
-        if start == -1 or end == 0:
-            raise ValueError(f"No se encontró JSON: {raw[:120]}")
-        return json.loads(raw[start:end])
+        if start != -1 and end > start:
+            try:
+                return json.loads(raw[start:end])
+            except json.JSONDecodeError:
+                pass
+
+        # Estrategia 3: seguir llaves correctamente (ignora truncaciones)
+        if start != -1:
+            depth     = 0
+            in_str    = False
+            escaped   = False
+            for i, c in enumerate(raw[start:], start):
+                if escaped:
+                    escaped = False
+                    continue
+                if c == "\\" and in_str:
+                    escaped = True
+                    continue
+                if c == '"':
+                    in_str = not in_str
+                    continue
+                if not in_str:
+                    if c == "{":
+                        depth += 1
+                    elif c == "}":
+                        depth -= 1
+                        if depth == 0:
+                            try:
+                                return json.loads(raw[start:i + 1])
+                            except json.JSONDecodeError:
+                                break
+
+        raise ValueError(f"Respuesta de IA no contiene JSON válido: {raw[:200]}")
 
     def _bg(self, fn):
         threading.Thread(target=fn, daemon=True).start()
 
     # ── Generar plan ───────────────────────────────────────────────────────────
     def generate_plan(self, goal: str):
-        """Captura pantalla (hilo principal) → llama a Claude (hilo de fondo)."""
         if self._is_busy():
             return
         self.goal = goal
 
-        # CAPTURA en hilo principal (seguro para Qt)
+        # Captura en hilo principal
         try:
             self.signals.status_changed.emit("Capturando pantalla…")
             img, pw, ph = capture_screen(with_grid=True)
@@ -87,17 +121,16 @@ class AICoach:
             self.signals.error_occurred.emit(f"Error capturando pantalla: {e}")
             return
 
-        # CLAUDE en hilo de fondo — NO usar del img aquí: Python marcaría
-        # img como variable local del closure y causaría UnboundLocalError
         def _run():
             try:
-                self.signals.status_changed.emit("Analizando con IA…")
+                self.signals.status_changed.emit("Tortuga está pensando…")
                 prompt = PLAN_USER.format(goal=goal, w=pw, h=ph, grid=GRID_STEP)
-                raw    = self._call_claude(PLAN_SYSTEM, prompt, img, max_tokens=800)
-                plan   = self._parse_json(raw)
+                # 2000 tokens — suficiente para 6 pasos con room to spare
+                raw  = self._call_claude(PLAN_SYSTEM, prompt, img, max_tokens=2000)
+                plan = self._parse_json(raw)
 
                 if "steps" not in plan or not plan["steps"]:
-                    raise ValueError("El plan no contiene pasos.")
+                    raise ValueError("El plan no tiene pasos.")
 
                 for s in plan["steps"]:
                     s.setdefault("region_w", 100)
@@ -105,13 +138,13 @@ class AICoach:
                     s.setdefault("element", "")
 
                 self.signals.plan_ready.emit(plan)
-                self.signals.status_changed.emit("Plan listo")
+                self.signals.status_changed.emit("Listo")
 
             except anthropic.AuthenticationError:
                 self.signals.error_occurred.emit(
-                    "API key inválida. Reinicia el programa con la clave correcta.")
+                    "API key inválida. Reinicia Tortuga con la clave correcta.")
             except json.JSONDecodeError as e:
-                self.signals.error_occurred.emit(f"Error leyendo respuesta de IA: {e}")
+                self.signals.error_occurred.emit(f"Error de formato IA: {e}")
             except Exception as e:
                 self.signals.error_occurred.emit(f"Error: {e}")
             finally:
@@ -119,9 +152,8 @@ class AICoach:
 
         self._bg(_run)
 
-    # ── Verificar paso completado ──────────────────────────────────────────────
+    # ── Verificar paso ─────────────────────────────────────────────────────────
     def verify_step(self, step: dict):
-        """Captura (hilo principal) → pregunta a Claude (hilo de fondo)."""
         if self._is_busy():
             return
 
@@ -141,7 +173,7 @@ class AICoach:
                     instruction=step["instruction"],
                     element=step.get("element", ""),
                 )
-                raw    = self._call_claude(PLAN_SYSTEM, prompt, img, max_tokens=200)
+                raw    = self._call_claude(PLAN_SYSTEM, prompt, img, max_tokens=256)
                 result = self._parse_json(raw)
                 result.setdefault("completed", False)
                 result.setdefault("feedback", "")
@@ -195,7 +227,7 @@ class AICoach:
         def _run():
             try:
                 self.signals.status_changed.emit("Mirando tu pantalla…")
-                answer = self._call_claude(PLAN_SYSTEM, WHERE_PROMPT, img, 250)
+                answer = self._call_claude(PLAN_SYSTEM, WHERE_PROMPT, img, 300)
                 self.signals.free_answer.emit(answer)
                 self.signals.status_changed.emit("Listo")
             except Exception as e:

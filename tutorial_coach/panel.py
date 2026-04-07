@@ -130,7 +130,7 @@ class ControlPanel(QWidget):
         icon.setFont(QFont(FONT, 16))
         icon.setStyleSheet("color: #1a73e8; background: transparent;")
         hdr.addWidget(icon)
-        t = QLabel("Asistente")
+        t = QLabel("Tortuga")
         t.setObjectName("title"); t.setFont(QFont(FONT, 14, QFont.DemiBold))
         hdr.addWidget(t)
         hdr.addStretch()
@@ -202,7 +202,7 @@ class ControlPanel(QWidget):
         p = QWidget(); l = QVBoxLayout(p)
         l.setContentsMargins(0, 8, 0, 0); l.setSpacing(10)
 
-        lbl = QLabel("¿Qué quieres aprender?")
+        lbl = QLabel("¿Qué querés hacer?")
         lbl.setFont(QFont(FONT, 13, QFont.DemiBold)); l.addWidget(lbl)
 
         self.chat_log = QTextEdit()

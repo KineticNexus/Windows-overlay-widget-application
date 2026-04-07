@@ -285,7 +285,7 @@ class TutorialApp:
 # ═══════════════════════════════════════════════════════════════════════════════
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("Asistente Tutorial")
+    app.setApplicationName("Tortuga")
 
     # Inicializar base de datos
     try:

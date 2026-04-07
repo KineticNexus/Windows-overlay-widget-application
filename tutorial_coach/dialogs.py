@@ -50,7 +50,7 @@ QPushButton#primary:pressed { background: #0d47a1; }
 class APIKeyDialog(QDialog):
     def __init__(self):
         super().__init__(None, Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
-        self.setWindowTitle("Asistente Tutorial — Configuración")
+        self.setWindowTitle("Tortuga — Configuración")
         self.setFixedWidth(460)
         self.setStyleSheet(_STYLE)
 
@@ -62,13 +62,13 @@ class APIKeyDialog(QDialog):
 
         # ── Logo + título ──────────────────────────────────────────────────
         logo_row = QHBoxLayout()
-        badge = QLabel("A")
+        badge = QLabel("T")
         badge.setFixedSize(38, 38)
         badge.setAlignment(Qt.AlignCenter)
         badge.setStyleSheet(
             "background:#1a73e8; color:white; border-radius:8px;"
             "font-size:18px; font-weight:bold; font-family:'Segoe UI',Arial;")
-        title_lbl = QLabel("Asistente Tutorial")
+        title_lbl = QLabel("Tortuga")
         title_lbl.setFont(QFont("Segoe UI", 17, QFont.Bold))
         title_lbl.setStyleSheet("color:#202124;")
         logo_row.addWidget(badge)
@@ -78,7 +78,7 @@ class APIKeyDialog(QDialog):
         layout.addLayout(logo_row)
         layout.addSpacing(6)
 
-        sub = QLabel("Ingresa tus claves de API para comenzar")
+        sub = QLabel("Ingresa tus claves para empezar")
         sub.setFont(QFont("Segoe UI", 11))
         sub.setStyleSheet("color:#5f6368;")
         layout.addWidget(sub)
