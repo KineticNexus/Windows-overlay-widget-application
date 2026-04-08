@@ -128,14 +128,32 @@ class TutorialApp:
         step  = self._steps[idx]
         total = len(self._steps)
 
-        # Las coordenadas ya son lógicas (capture.py redimensiona a lógico
-        # antes del grid, Claude devuelve coords en ese espacio).
-        # No se necesita conversión.
+        # Claude devuelve coordenadas NORMALIZADAS (fracciones 0.000–1.000).
+        # Las convertimos a píxeles lógicos multiplicando por las dimensiones de pantalla.
+        # Compatibilidad: si target_x > 2.0, son píxeles legacy → convertir.
+        from PyQt5.QtWidgets import QApplication
+        geo = QApplication.primaryScreen().geometry()
+        sw, sh = geo.width(), geo.height()
+
+        tx = float(step["target_x"])
+        ty = float(step["target_y"])
+        rw = float(step.get("region_w", 0.08))
+        rh = float(step.get("region_h", 0.04))
+
+        if tx > 2.0:   # coordenadas legacy en píxeles
+            tx = tx / sw
+        if ty > 2.0:
+            ty = ty / sh
+        if rw > 2.0:
+            rw = rw / sw
+        if rh > 2.0:
+            rh = rh / sh
+
         display = dict(step,
-                       target_x=int(step["target_x"]),
-                       target_y=int(step["target_y"]),
-                       region_w=int(step.get("region_w", 100)),
-                       region_h=int(step.get("region_h", 40)))
+                       target_x=int(tx * sw),
+                       target_y=int(ty * sh),
+                       region_w=max(40, int(rw * sw)),
+                       region_h=max(20, int(rh * sh)))
 
         self.overlay.set_step(display, total)
         self.panel.show_guide_mode(step, total)

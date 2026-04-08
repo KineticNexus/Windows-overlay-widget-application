@@ -12,7 +12,7 @@ import anthropic
 
 from tutorial_coach.config import (
     MODEL, PLAN_SYSTEM, PLAN_USER, VERIFY_PROMPT,
-    FREEQ_PROMPT, WHERE_PROMPT, GRID_STEP,
+    FREEQ_PROMPT, WHERE_PROMPT,
 )
 from tutorial_coach.capture import capture_screen
 from tutorial_coach.signals import Signals
@@ -124,7 +124,7 @@ class AICoach:
         def _run():
             try:
                 self.signals.status_changed.emit("Tortuga está pensando…")
-                prompt = PLAN_USER.format(goal=goal, w=pw, h=ph, grid=GRID_STEP)
+                prompt = PLAN_USER.format(goal=goal)
                 # 2000 tokens — suficiente para 6 pasos con room to spare
                 raw  = self._call_claude(PLAN_SYSTEM, prompt, img, max_tokens=2000)
                 plan = self._parse_json(raw)
@@ -133,8 +133,8 @@ class AICoach:
                     raise ValueError("El plan no tiene pasos.")
 
                 for s in plan["steps"]:
-                    s.setdefault("region_w", 100)
-                    s.setdefault("region_h", 40)
+                    s.setdefault("region_w", 0.08)   # 8% del ancho
+                    s.setdefault("region_h", 0.04)   # 4% del alto
                     s.setdefault("element", "")
 
                 self.signals.plan_ready.emit(plan)

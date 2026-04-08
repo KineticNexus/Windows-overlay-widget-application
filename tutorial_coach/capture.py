@@ -4,10 +4,10 @@ Captura de pantalla.
 Arquitectura matemática:
   1. mss captura en píxeles FÍSICOS del hardware.
   2. La imagen se redimensiona a píxeles LÓGICOS (Qt / pynput) ANTES del grid.
-  3. El grid se dibuja en coordenadas lógicas.
-  4. Claude lee coordenadas lógicas del grid y las devuelve.
-  5. El overlay dibuja en esas mismas coordenadas lógicas.
-  → Cero conversión de coordenadas. Alineación perfecta garantizada.
+  3. El grid muestra etiquetas de PORCENTAJE (0%, 25%, 50%, 75%, 100%).
+  4. Claude devuelve coordenadas NORMALIZADAS (fracciones 0.000–1.000).
+  5. app.py multiplica por las dimensiones lógicas para dibujar el overlay.
+  → Invariante a DPI, resolución y versión de Windows. Alineación perfecta.
 """
 import base64
 import time
@@ -15,8 +15,6 @@ from io import BytesIO
 
 import mss
 from PIL import Image, ImageDraw, ImageFont
-
-from tutorial_coach.config import GRID_STEP
 
 _widgets_to_hide = []
 
@@ -48,55 +46,75 @@ def _logical_size():
     return geo.width(), geo.height()
 
 
-def _draw_grid(img: Image.Image, lw: int, lh: int, step: int = GRID_STEP):
+def _draw_grid(img: Image.Image, lw: int, lh: int):
     """
-    Dibuja cuadrícula con etiquetas en coordenadas LÓGICAS.
+    Dibuja cuadrícula con etiquetas de PORCENTAJE.
+    Líneas principales en 0%, 25%, 50%, 75%, 100%.
+    Líneas secundarias en 10%, 20%, 30%, 40%, 60%, 70%, 80%, 90%.
     La imagen ya está redimensionada a (lw × lh) antes de llamar esta función.
     """
     draw = ImageDraw.Draw(img, "RGBA")
 
     try:
         font_big = ImageFont.truetype("arial.ttf", 20)
-        font_sm  = ImageFont.truetype("arial.ttf", 14)
+        font_sm  = ImageFont.truetype("arial.ttf", 13)
     except OSError:
         font_big = ImageFont.load_default()
         font_sm  = font_big
 
-    RED    = (220, 50, 50, 200)
-    BG_LBL = (255, 255, 255, 210)
+    RED_MAIN = (220, 50,  50, 200)
+    RED_SUB  = (220, 50,  50, 110)
+    BG_LBL   = (255, 255, 255, 220)
 
-    # Líneas verticales
-    for x in range(0, lw, step):
-        draw.line([(x, 0), (x, lh)], fill=(220, 50, 50, 70), width=1)
-        lbl = str(x)
-        tw  = len(lbl) * 12
-        # Etiqueta arriba
-        draw.rectangle([x + 2, 2, x + 2 + tw, 26], fill=BG_LBL)
-        draw.text((x + 4, 4), lbl, fill=RED, font=font_big)
-        # Etiqueta abajo
-        draw.rectangle([x + 2, lh - 26, x + 2 + tw, lh - 2], fill=BG_LBL)
-        draw.text((x + 4, lh - 24), lbl, fill=RED, font=font_sm)
+    MAJOR = {0, 25, 50, 75, 100}
+    MINOR = {10, 20, 30, 40, 60, 70, 80, 90}
 
-    # Líneas horizontales
-    for y in range(0, lh, step):
-        draw.line([(0, y), (lw, y)], fill=(220, 50, 50, 70), width=1)
-        lbl = str(y)
-        tw  = len(lbl) * 12
-        # Etiqueta izquierda
-        draw.rectangle([2, y + 2, 2 + tw, y + 26], fill=BG_LBL)
-        draw.text((4, y + 4), lbl, fill=RED, font=font_big)
-        # Etiqueta derecha
-        draw.rectangle([lw - 2 - tw, y + 2, lw - 2, y + 26], fill=BG_LBL)
-        draw.text((lw - tw, y + 4), lbl, fill=RED, font=font_sm)
+    # ── Líneas verticales ──────────────────────────────────────────────────────
+    for pct in sorted(MAJOR | MINOR):
+        x   = int(pct * lw / 100)
+        lbl = f"{pct}%"
+        tw  = len(lbl) * 10
+
+        if pct in MAJOR:
+            draw.line([(x, 0), (x, lh)], fill=(220, 50, 50, 130), width=2)
+            # Etiqueta arriba
+            draw.rectangle([x + 2, 2, x + 2 + tw, 26], fill=BG_LBL)
+            draw.text((x + 4, 4), lbl, fill=RED_MAIN, font=font_big)
+            # Etiqueta abajo
+            draw.rectangle([x + 2, lh - 26, x + 2 + tw, lh - 2], fill=BG_LBL)
+            draw.text((x + 4, lh - 24), lbl, fill=RED_MAIN, font=font_sm)
+        else:
+            draw.line([(x, 0), (x, lh)], fill=(220, 50, 50, 50), width=1)
+            draw.rectangle([x + 2, 2, x + 2 + tw, 20], fill=BG_LBL)
+            draw.text((x + 4, 3), lbl, fill=RED_SUB, font=font_sm)
+
+    # ── Líneas horizontales ────────────────────────────────────────────────────
+    for pct in sorted(MAJOR | MINOR):
+        y   = int(pct * lh / 100)
+        lbl = f"{pct}%"
+        tw  = len(lbl) * 10
+
+        if pct in MAJOR:
+            draw.line([(0, y), (lw, y)], fill=(220, 50, 50, 130), width=2)
+            # Etiqueta izquierda
+            draw.rectangle([2, y + 2, 2 + tw, y + 26], fill=BG_LBL)
+            draw.text((4, y + 4), lbl, fill=RED_MAIN, font=font_big)
+            # Etiqueta derecha
+            draw.rectangle([lw - 2 - tw, y + 2, lw - 2, y + 26], fill=BG_LBL)
+            draw.text((lw - tw, y + 4), lbl, fill=RED_MAIN, font=font_sm)
+        else:
+            draw.line([(0, y), (lw, y)], fill=(220, 50, 50, 50), width=1)
+            draw.rectangle([2, y + 2, 2 + tw, y + 20], fill=BG_LBL)
+            draw.text((4, y + 3), lbl, fill=RED_SUB, font=font_sm)
 
 
 def capture_screen(with_grid: bool = True) -> tuple:
     """
-    Captura, redimensiona a lógico, dibuja grid, codifica.
+    Captura, redimensiona a lógico, dibuja grid de porcentajes, codifica.
 
     Returns:
         (base64_jpeg, logical_width, logical_height)
-        Las coordenadas del grid SON coordenadas lógicas — sin conversión.
+        Las coordenadas del grid son PORCENTAJES → Claude devuelve fracciones 0.0–1.0.
     """
     lw, lh = _logical_size()
 
@@ -110,21 +128,18 @@ def capture_screen(with_grid: bool = True) -> tuple:
         _show_widgets()
 
     # Paso crítico: redimensionar a lógico ANTES del grid
-    # Ahora cada pixel de la imagen = 1 pixel lógico Qt = 1 unidad pynput
     if img.size != (lw, lh):
         img = img.resize((lw, lh), Image.LANCZOS)
 
     if with_grid:
         _draw_grid(img, lw, lh)
 
-    # Si la resolución lógica supera 1920 (pantallas muy grandes),
-    # reducir para limitar tokens de API pero escalar las coordenadas
-    # proporcionalmente (pasamos lw/lh al prompt, no las dimensiones de imagen)
+    # Si la resolución lógica supera 1920, reducir para limitar tokens de API.
+    # lw/lh devueltos siguen siendo los lógicos reales — Claude dará fracciones
+    # que se multiplican por lw/lh en app.py.
     if lw > 1920:
         scale = 1920 / lw
         img = img.resize((1920, int(lh * scale)), Image.LANCZOS)
-        # NOTA: lw/lh devueltos siguen siendo los lógicos reales
-        # El prompt incluye lw/lh para que Claude dé coords en ese espacio
 
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=85)

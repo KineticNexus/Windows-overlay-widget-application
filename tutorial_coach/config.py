@@ -62,21 +62,23 @@ PLAN_SYSTEM = """Eres Tortuga, un asistente visual que guía a personas mayores 
 Analizas capturas de pantalla con cuadrícula y generas planes concisos en JSON válido.
 NUNCA incluyas texto fuera del JSON. NUNCA uses comillas dentro de los valores de string."""
 
-PLAN_USER = """Analiza esta captura. Resolución del monitor: {w}x{h} px.
+PLAN_USER = """Analiza esta captura de pantalla.
 
-CUADRÍCULA: líneas rojas cada {grid} px con números de posición.
-Eje X: izquierda=0, derecha={w}. Eje Y: arriba=0, abajo={h}.
-USA los números visibles en la cuadrícula para coordenadas exactas.
+CUADRÍCULA: líneas rojas con etiquetas de porcentaje (0%, 25%, 50%, 75%, 100%).
+Las coordenadas se expresan como FRACCIÓN de 0.000 a 1.000:
+  target_x=0.000 → borde izquierdo  |  target_x=0.500 → centro  |  target_x=1.000 → borde derecho
+  target_y=0.000 → borde superior   |  target_y=0.500 → centro  |  target_y=1.000 → borde inferior
+  region_w y region_h también son fracciones (ejemplo: 0.080 = 8% del ancho/alto de pantalla)
 
 Tarea: {goal}
 
 Responde SOLO con este JSON (sin texto extra antes ni después):
-{{"title":"título corto","steps":[{{"n":1,"instruction":"acción simple en máximo 10 palabras","target_x":640,"target_y":360,"region_w":120,"region_h":40,"element":"descripción corta del elemento"}}]}}
+{{"title":"título corto","steps":[{{"n":1,"instruction":"acción simple en máximo 10 palabras","target_x":0.500,"target_y":0.500,"region_w":0.080,"region_h":0.040,"element":"descripción corta del elemento"}}]}}
 
 Reglas:
 - Máximo 6 pasos. Una acción por paso.
-- target_x y target_y = centro exacto del elemento usando la cuadrícula.
-- Usa presiona en lugar de haz clic. Sin tecnicismos.
+- target_x y target_y = centro exacto del elemento como fracción de la pantalla.
+- Usa "presiona" en lugar de "haz clic". Sin tecnicismos.
 - Si la pantalla no muestra la app necesaria, el paso 1 es abrirla.
 - Sin comillas dobles dentro de los valores de string."""
 
