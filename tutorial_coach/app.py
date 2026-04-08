@@ -38,10 +38,11 @@ class TutorialApp:
         # Ocultar widgets durante capturas de pantalla
         capture.register_widgets(self.overlay, self.panel)
 
-        self._steps:   list = []
-        self._current: int  = 0
-        self._session_id: int = 0
-        self._mic_active = False
+        self._steps:      list = []
+        self._current:    int  = 0
+        self._session_id: int  = 0
+        self._mic_active      = False
+        self._move_mic_active = False
 
         self._connect_signals()
         self._load_history()
@@ -64,10 +65,14 @@ class TutorialApp:
         p.prev_clicked.connect(self._go_prev)
         p.next_clicked.connect(self._go_next)
         p.reset_clicked.connect(self._reset)
+        p.stop_clicked.connect(self._stop)
         p.mic_clicked.connect(self._toggle_mic)
+        p.move_mic_clicked.connect(self._toggle_move_mic)
         p.help_clicked.connect(self._on_help)
         p.profile_saved.connect(self._on_profile_saved)
         p.close_clicked.connect(self._quit)
+        # Señales IA
+        s.mouse_moved.connect(self._on_mouse_moved)
 
     # ── Arranque ──────────────────────────────────────────────────────────────
     def run(self):
@@ -224,6 +229,7 @@ class TutorialApp:
             self._show_step(self._current)
 
     def _reset(self):
+        self.coach.cancel()
         self._steps   = []
         self._current = 0
         self.overlay.clear()
@@ -231,21 +237,48 @@ class TutorialApp:
         self.panel.show_chat_mode()
         self.panel.set_status("Listo")
 
-    # ── Voz ───────────────────────────────────────────────────────────────────
+    def _stop(self):
+        """Detiene el plan actual y vuelve a la pantalla de chat."""
+        self._reset()
+        self.panel.append_chat("Sistema", "Plan detenido.", "#9AA0A6")
+
+    # ── Voz para tareas ────────────────────────────────────────────────────────
     def _toggle_mic(self):
-        if self._mic_active:
+        if self._mic_active or self._move_mic_active:
             return
         self._mic_active = True
         self.panel.set_mic_state("recording")
         voice.listen(self.signals)
 
     def _on_voice_text(self, text: str):
-        self._mic_active = False
+        was_move_mode         = self._move_mic_active
+        self._mic_active      = False
+        self._move_mic_active = False
         self.panel.set_mic_state("idle")
-        self.panel.chat_input.setText(text)
         self.panel.append_chat("Tú (voz)", text, "#34a853")
-        self.panel.set_busy(True)
-        self.coach.generate_plan(text)
+
+        if was_move_mode:
+            # Modo mover mouse: buscar el elemento y mover el cursor
+            self.panel.set_status("Buscando elemento…")
+            self.coach.find_and_move(text)
+        else:
+            # Modo tarea: generar plan
+            self.panel.chat_input.setText(text)
+            self.panel.set_busy(True)
+            self.coach.generate_plan(text)
+
+    # ── Voz para mover mouse ───────────────────────────────────────────────────
+    def _toggle_move_mic(self):
+        """Activa el micrófono en modo mover-mouse."""
+        if self._mic_active or self._move_mic_active:
+            return
+        self._move_mic_active = True
+        self.panel.set_status("Habla: ¿dónde querés ir?")
+        self.panel.set_mic_state("recording")
+        voice.listen(self.signals)
+
+    def _on_mouse_moved(self, x: int, y: int):
+        self.panel.append_chat("Tortuga", f"Mouse movido a ({x}, {y})", "#4ECDC4")
 
     def _on_voice_status(self, status: str):
         if status.startswith("error:"):

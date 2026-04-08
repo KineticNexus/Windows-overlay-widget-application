@@ -13,10 +13,12 @@ class Signals(QObject):
     # ── Eventos de usuario ─────────────────────────────────────────────────────
     target_clicked   = pyqtSignal()        # click cerca del target actual
     hotkey_pressed   = pyqtSignal(str)     # hotkey global presionada (ej: "f1")
+    stop_requested   = pyqtSignal()        # usuario presionó Detener
 
     # ── Voz ────────────────────────────────────────────────────────────────────
     voice_text_ready = pyqtSignal(str)     # STT terminó: texto reconocido
     voice_status     = pyqtSignal(str)     # "recording", "processing", "idle"
+    mouse_moved      = pyqtSignal(int, int)  # mouse movido a (x, y) por IA
 
     # ── Recorder ───────────────────────────────────────────────────────────────
     recording_step   = pyqtSignal(dict)    # nuevo paso grabado

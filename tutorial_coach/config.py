@@ -59,28 +59,49 @@ def save_profile(profile: dict):
 
 # ── Prompts ────────────────────────────────────────────────────────────────────
 PLAN_SYSTEM = """Eres Tortuga, un asistente visual que guía a personas mayores paso a paso en la computadora.
-Analizas capturas de pantalla con cuadrícula y generas planes concisos en JSON válido.
+Analizas capturas de pantalla y generas respuestas JSON válidas.
 NUNCA incluyas texto fuera del JSON. NUNCA uses comillas dentro de los valores de string."""
 
-PLAN_USER = """Analiza esta captura de pantalla.
+# ── Dos-fase de coordenadas ────────────────────────────────────────────────────
+# Fase 1: pantalla completa dividida en 8 cuadros (4 cols × 2 filas).
+#   Cuadros: fila superior 0 1 2 3 | fila inferior 4 5 6 7
+# Fase 2: imagen del cuadro seleccionado → coordenadas exactas dentro de él.
+# Las coordenadas globales se calculan en app.py / ai_coach.py.
 
-CUADRÍCULA: líneas rojas con etiquetas de porcentaje (0%, 25%, 50%, 75%, 100%).
-Las coordenadas se expresan como FRACCIÓN de 0.000 a 1.000:
-  target_x=0.000 → borde izquierdo  |  target_x=0.500 → centro  |  target_x=1.000 → borde derecho
-  target_y=0.000 → borde superior   |  target_y=0.500 → centro  |  target_y=1.000 → borde inferior
-  region_w y region_h también son fracciones (ejemplo: 0.080 = 8% del ancho/alto de pantalla)
+PHASE1_PLAN_USER = """Analiza esta captura de pantalla.
+La pantalla está dividida en 8 cuadros numerados (fila superior: 0 1 2 3 | fila inferior: 4 5 6 7).
 
-Tarea: {goal}
+Tarea del usuario: {goal}
 
-Responde SOLO con este JSON (sin texto extra antes ni después):
-{{"title":"título corto","steps":[{{"n":1,"instruction":"acción simple en máximo 10 palabras","target_x":0.500,"target_y":0.500,"region_w":0.080,"region_h":0.040,"element":"descripción corta del elemento"}}]}}
+Para cada paso indica en qué cuadro (0-7) se encuentra el elemento objetivo.
+Responde SOLO con este JSON (sin texto extra):
+{{"title":"título corto","steps":[{{"n":1,"instruction":"acción en máximo 10 palabras","square":0,"element":"descripción precisa del elemento UI"}}]}}
 
 Reglas:
-- Máximo 6 pasos. Una acción por paso.
-- target_x y target_y = centro exacto del elemento como fracción de la pantalla.
-- Usa "presiona" en lugar de "haz clic". Sin tecnicismos.
-- Si la pantalla no muestra la app necesaria, el paso 1 es abrirla.
+- Máximo 6 pasos. square = cuadro (0-7) donde está el elemento a usar.
+- element = descripción corta y precisa: botón, icono, campo, menú, etc.
+- Usa presiona en lugar de haz clic. Sin tecnicismos.
+- Si la app no está visible, el primer paso es abrirla (square=0).
 - Sin comillas dobles dentro de los valores de string."""
+
+PHASE2_COORDS_USER = """Esta imagen es el recorte ampliado de UN cuadro de la pantalla.
+Encuentra exactamente: {element}
+
+Responde SOLO con este JSON:
+{{"x":0.500,"y":0.500}}
+
+x = fracción horizontal (0.000=izquierda, 0.500=centro, 1.000=derecha)
+y = fracción vertical (0.000=arriba, 0.500=centro, 1.000=abajo)
+El punto debe estar en el CENTRO EXACTO del elemento objetivo."""
+
+LOCATE_PHASE1_USER = """La pantalla está dividida en 8 cuadros (fila sup: 0 1 2 3 | fila inf: 4 5 6 7).
+¿En qué cuadro está: {element}?
+Responde SOLO con: {{"square":0}}"""
+
+LOCATE_PHASE2_USER = """Recorte ampliado de UN cuadro de la pantalla.
+¿Dónde está exactamente: {element}?
+Responde SOLO con: {{"x":0.500,"y":0.500}}
+x = izquierda→derecha (0.0 a 1.0), y = arriba→abajo (0.0 a 1.0)."""
 
 VERIFY_PROMPT = """Captura de pantalla. Usuario intentaba: {goal}
 Paso {n}: {instruction} (elemento: {element})

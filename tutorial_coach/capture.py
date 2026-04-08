@@ -1,13 +1,13 @@
 """
 Captura de pantalla.
 
-Arquitectura matemática:
-  1. mss captura en píxeles FÍSICOS del hardware.
-  2. La imagen se redimensiona a píxeles LÓGICOS (Qt / pynput) ANTES del grid.
-  3. El grid muestra etiquetas de PORCENTAJE (0%, 25%, 50%, 75%, 100%).
-  4. Claude devuelve coordenadas NORMALIZADAS (fracciones 0.000–1.000).
-  5. app.py multiplica por las dimensiones lógicas para dibujar el overlay.
-  → Invariante a DPI, resolución y versión de Windows. Alineación perfecta.
+Arquitectura de dos fases para máxima precisión de coordenadas:
+  Fase 1: pantalla completa dividida en 8 cuadros (4×2) con números grandes.
+           Claude elige el cuadro donde está el elemento objetivo.
+  Fase 2: ese cuadro se recorta y amplía → Claude da coords dentro del cuadro.
+  Conversión: global_x = (col + local_x) / COLS   (fracción 0.0-1.0)
+              global_y = (row + local_y) / ROWS
+  app.py multiplica por dimensiones lógicas de pantalla.
 """
 import base64
 import time
@@ -15,6 +15,10 @@ from io import BytesIO
 
 import mss
 from PIL import Image, ImageDraw, ImageFont
+
+# Dimensiones del grid de dos fases
+GRID_COLS = 4
+GRID_ROWS = 2
 
 _widgets_to_hide = []
 
@@ -46,101 +50,132 @@ def _logical_size():
     return geo.width(), geo.height()
 
 
-def _draw_grid(img: Image.Image, lw: int, lh: int):
+def _raw_capture() -> Image.Image:
+    """Captura la pantalla física y la devuelve como PIL Image (sin resize)."""
+    with mss.mss() as sct:
+        mon  = sct.monitors[1]
+        shot = sct.grab(mon)
+        return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+
+
+def _draw_squares(img: Image.Image, lw: int, lh: int):
     """
-    Dibuja cuadrícula con etiquetas de PORCENTAJE.
-    Líneas principales en 0%, 25%, 50%, 75%, 100%.
-    Líneas secundarias en 10%, 20%, 30%, 40%, 60%, 70%, 80%, 90%.
-    La imagen ya está redimensionada a (lw × lh) antes de llamar esta función.
+    Dibuja 8 cuadros numerados (4×2) sobre img.
+    Los números son grandes y muy visibles para que Claude los lea sin error.
     """
     draw = ImageDraw.Draw(img, "RGBA")
-
     try:
-        font_big = ImageFont.truetype("arial.ttf", 20)
-        font_sm  = ImageFont.truetype("arial.ttf", 13)
+        font_num = ImageFont.truetype("arial.ttf", 96)
+        font_lbl = ImageFont.truetype("arial.ttf", 18)
     except OSError:
-        font_big = ImageFont.load_default()
-        font_sm  = font_big
+        font_num = ImageFont.load_default()
+        font_lbl = font_num
 
-    RED_MAIN = (220, 50,  50, 200)
-    RED_SUB  = (220, 50,  50, 110)
-    BG_LBL   = (255, 255, 255, 220)
+    cell_w = lw // GRID_COLS
+    cell_h = lh // GRID_ROWS
 
-    MAJOR = {0, 25, 50, 75, 100}
-    MINOR = {10, 20, 30, 40, 60, 70, 80, 90}
+    for row in range(GRID_ROWS):
+        for col in range(GRID_COLS):
+            sq_id = row * GRID_COLS + col
+            x0 = col * cell_w
+            y0 = row * cell_h
+            x1 = x0 + cell_w - 1
+            y1 = y0 + cell_h - 1
 
-    # ── Líneas verticales ──────────────────────────────────────────────────────
-    for pct in sorted(MAJOR | MINOR):
-        x   = int(pct * lw / 100)
-        lbl = f"{pct}%"
-        tw  = len(lbl) * 10
+            # Borde del cuadro (rojo semitransparente)
+            draw.rectangle([x0, y0, x1, y1],
+                           outline=(220, 40, 40, 180), width=3)
 
-        if pct in MAJOR:
-            draw.line([(x, 0), (x, lh)], fill=(220, 50, 50, 130), width=2)
-            # Etiqueta arriba
-            draw.rectangle([x + 2, 2, x + 2 + tw, 26], fill=BG_LBL)
-            draw.text((x + 4, 4), lbl, fill=RED_MAIN, font=font_big)
-            # Etiqueta abajo
-            draw.rectangle([x + 2, lh - 26, x + 2 + tw, lh - 2], fill=BG_LBL)
-            draw.text((x + 4, lh - 24), lbl, fill=RED_MAIN, font=font_sm)
-        else:
-            draw.line([(x, 0), (x, lh)], fill=(220, 50, 50, 50), width=1)
-            draw.rectangle([x + 2, 2, x + 2 + tw, 20], fill=BG_LBL)
-            draw.text((x + 4, 3), lbl, fill=RED_SUB, font=font_sm)
+            # Fondo para el número (esquina superior izquierda del cuadro)
+            num_str = str(sq_id)
+            bg_pad = 10
+            bg_x0  = x0 + 12
+            bg_y0  = y0 + 12
+            bg_x1  = bg_x0 + 80
+            bg_y1  = bg_y0 + 100
+            draw.rectangle([bg_x0 - bg_pad, bg_y0 - bg_pad,
+                            bg_x1 + bg_pad, bg_y1 + bg_pad],
+                           fill=(255, 255, 255, 210))
 
-    # ── Líneas horizontales ────────────────────────────────────────────────────
-    for pct in sorted(MAJOR | MINOR):
-        y   = int(pct * lh / 100)
-        lbl = f"{pct}%"
-        tw  = len(lbl) * 10
+            # Número grande
+            draw.text((bg_x0, bg_y0), num_str,
+                      fill=(200, 30, 30, 255), font=font_num)
 
-        if pct in MAJOR:
-            draw.line([(0, y), (lw, y)], fill=(220, 50, 50, 130), width=2)
-            # Etiqueta izquierda
-            draw.rectangle([2, y + 2, 2 + tw, y + 26], fill=BG_LBL)
-            draw.text((4, y + 4), lbl, fill=RED_MAIN, font=font_big)
-            # Etiqueta derecha
-            draw.rectangle([lw - 2 - tw, y + 2, lw - 2, y + 26], fill=BG_LBL)
-            draw.text((lw - tw, y + 4), lbl, fill=RED_MAIN, font=font_sm)
-        else:
-            draw.line([(0, y), (lw, y)], fill=(220, 50, 50, 50), width=1)
-            draw.rectangle([2, y + 2, 2 + tw, y + 20], fill=BG_LBL)
-            draw.text((4, y + 3), lbl, fill=RED_SUB, font=font_sm)
+            # Etiqueta fila/col pequeña debajo del número
+            coord_lbl = f"fila {row} col {col}"
+            draw.text((bg_x0, bg_y1 + 2), coord_lbl,
+                      fill=(150, 30, 30, 200), font=font_lbl)
 
 
-def capture_screen(with_grid: bool = True) -> tuple:
+def _to_b64_jpeg(img: Image.Image, quality: int = 85,
+                 max_width: int = 1920) -> str:
+    if img.width > max_width:
+        scale = max_width / img.width
+        img = img.resize((max_width, int(img.height * scale)), Image.LANCZOS)
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+# ── API pública ────────────────────────────────────────────────────────────────
+
+def capture_screen_and_squares() -> tuple:
     """
-    Captura, redimensiona a lógico, dibuja grid de porcentajes, codifica.
+    Captura la pantalla UNA SOLA VEZ y genera:
+      - phase1_b64: imagen completa con 8 cuadros numerados (para Claude Fase 1)
+      - squares:    lista de 8 b64, cada una es el recorte ampliado del cuadro
+      - lw, lh:     dimensiones lógicas de la pantalla
 
-    Returns:
-        (base64_jpeg, logical_width, logical_height)
-        Las coordenadas del grid son PORCENTAJES → Claude devuelve fracciones 0.0–1.0.
+    Solo llamar desde el hilo principal de Qt.
+    """
+    lw, lh = _logical_size()
+    cell_w = lw // GRID_COLS
+    cell_h = lh // GRID_ROWS
+
+    _hide_widgets()
+    try:
+        raw = _raw_capture()
+    finally:
+        _show_widgets()
+
+    # Redimensionar a lógico
+    if raw.size != (lw, lh):
+        raw = raw.resize((lw, lh), Image.LANCZOS)
+
+    # Recortes por cuadro ANTES de agregar overlay (imagen limpia)
+    squares = []
+    for sq_id in range(GRID_COLS * GRID_ROWS):
+        col = sq_id % GRID_COLS
+        row = sq_id // GRID_COLS
+        x0, y0 = col * cell_w, row * cell_h
+        crop = raw.crop((x0, y0, x0 + cell_w, y0 + cell_h))
+        # Ampliar 2× para mejor visión del LLM (más detalle del elemento)
+        crop = crop.resize((cell_w * 2, cell_h * 2), Image.LANCZOS)
+        squares.append(_to_b64_jpeg(crop, quality=92, max_width=1920))
+
+    # Fase 1: imagen con cuadros numerados
+    phase1_img = raw.copy()
+    _draw_squares(phase1_img, lw, lh)
+    phase1_b64 = _to_b64_jpeg(phase1_img, quality=85, max_width=1920)
+
+    return phase1_b64, squares, lw, lh
+
+
+def capture_screen(with_grid: bool = False) -> tuple:
+    """
+    Captura simple para verify_step, where_am_i, ask_free.
+    Returns: (base64_jpeg, logical_width, logical_height)
     """
     lw, lh = _logical_size()
 
     _hide_widgets()
     try:
-        with mss.mss() as sct:
-            mon  = sct.monitors[1]
-            shot = sct.grab(mon)
-            img  = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+        raw = _raw_capture()
     finally:
         _show_widgets()
 
-    # Paso crítico: redimensionar a lógico ANTES del grid
-    if img.size != (lw, lh):
-        img = img.resize((lw, lh), Image.LANCZOS)
+    if raw.size != (lw, lh):
+        raw = raw.resize((lw, lh), Image.LANCZOS)
 
-    if with_grid:
-        _draw_grid(img, lw, lh)
-
-    # Si la resolución lógica supera 1920, reducir para limitar tokens de API.
-    # lw/lh devueltos siguen siendo los lógicos reales — Claude dará fracciones
-    # que se multiplican por lw/lh en app.py.
-    if lw > 1920:
-        scale = 1920 / lw
-        img = img.resize((1920, int(lh * scale)), Image.LANCZOS)
-
-    buf = BytesIO()
-    img.save(buf, format="JPEG", quality=85)
-    return base64.b64encode(buf.getvalue()).decode(), lw, lh
+    b64 = _to_b64_jpeg(raw, quality=85, max_width=1920)
+    return b64, lw, lh

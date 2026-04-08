@@ -105,6 +105,33 @@ QPushButton#close_btn:hover {
     color: #FF6B6B;
 }
 
+/* ── Stop ────────────────────────────────────────────────────── */
+QPushButton#stop_btn {
+    background: rgba(255, 107, 107, 25);
+    color: #FF6B6B;
+    border: 1px solid rgba(255, 107, 107, 90);
+    border-radius: 2px;
+    font-size: 11px;
+    font-weight: bold;
+}
+QPushButton#stop_btn:hover {
+    background: rgba(255, 107, 107, 70);
+    color: white;
+}
+
+/* ── Mover mouse (mic coral) ─────────────────────────────────── */
+QPushButton#mic_move {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #FF6B6B, stop:1 #E53E3E);
+    color: white;
+    border: none;
+    border-radius: 2px;
+}
+QPushButton#mic_move:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #E53E3E, stop:1 #C53030);
+}
+
 /* ── Micrófono ───────────────────────────────────────────────── */
 QPushButton#mic {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -157,7 +184,9 @@ class ControlPanel(QWidget):
     prev_clicked   = pyqtSignal()
     next_clicked   = pyqtSignal()
     reset_clicked  = pyqtSignal()
+    stop_clicked   = pyqtSignal()
     mic_clicked    = pyqtSignal()
+    move_mic_clicked = pyqtSignal()   # microfono para mover el mouse
     help_clicked   = pyqtSignal()
     close_clicked  = pyqtSignal()
     profile_saved  = pyqtSignal(dict)
@@ -217,6 +246,14 @@ class ControlPanel(QWidget):
         self.status_lbl.setFont(QFont(FONT, 9))
         self.status_lbl.setStyleSheet("color: rgba(247,255,247,150); background: transparent;")
         hdr_inner.addWidget(self.status_lbl)
+
+        stop_btn = QPushButton("■ Stop")
+        stop_btn.setObjectName("stop_btn")
+        stop_btn.setFixedHeight(26)
+        stop_btn.setFont(QFont(FONT, 9, QFont.Bold))
+        stop_btn.setToolTip("Detener")
+        stop_btn.clicked.connect(self.stop_clicked.emit)
+        hdr_inner.addWidget(stop_btn)
 
         help_btn = QPushButton("?")
         help_btn.setObjectName("sec")
@@ -317,9 +354,17 @@ class ControlPanel(QWidget):
         self.mic_btn.setObjectName("mic")
         self.mic_btn.setFixedSize(40, 40)
         self.mic_btn.setFont(QFont("Segoe MDL2 Assets", 15))
-        self.mic_btn.setToolTip("Hablar")
+        self.mic_btn.setToolTip("Hablar para dar una tarea")
         self.mic_btn.clicked.connect(self.mic_clicked.emit)
         row.addWidget(self.mic_btn)
+
+        self.move_mic_btn = QPushButton("\uE759")   # cursor icon
+        self.move_mic_btn.setObjectName("mic_move")
+        self.move_mic_btn.setFixedSize(40, 40)
+        self.move_mic_btn.setFont(QFont("Segoe MDL2 Assets", 15))
+        self.move_mic_btn.setToolTip("Hablar para mover el mouse")
+        self.move_mic_btn.clicked.connect(self.move_mic_clicked.emit)
+        row.addWidget(self.move_mic_btn)
         l.addLayout(row)
 
         self.send_btn = QPushButton("Comenzar  →")
