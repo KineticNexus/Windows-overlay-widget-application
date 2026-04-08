@@ -1,15 +1,14 @@
-"""Motor de IA: genera planes (dos fases), verifica pasos, mueve mouse por voz.
+"""Motor de IA — sistema de tres fases para coordenadas.
 
 Threading:
-  - capture_screen / capture_screen_and_squares corren en el hilo principal (Qt).
-  - Solo las llamadas a Claude van al hilo de fondo.
-  - Signals PyQt5 cross-thread son thread-safe (queued connections).
+  capture_for_three_phase() corre en el hilo principal (Qt).
+  make_phase2_crop / make_phase3_crop / llamadas a Claude → hilo de fondo.
 
-Dos-fase de coordenadas:
-  Fase 1 → Claude elige el cuadro (0-7) donde está el elemento.
-  Fase 2 → Claude da (x,y) normalizado dentro del recorte de ese cuadro.
-  global_x = (col + local_x) / GRID_COLS
-  global_y = (row + local_y) / GRID_ROWS
+Conversión a coordenadas globales (GRID_COLS=4, GRID_ROWS=2):
+  col1,row1 = sq1 % 4, sq1 // 4
+  col2,row2 = sq2 % 4, sq2 // 4
+  global_x  = (4·col1 + col2 + lx) / 16    ← resolución 16× en X
+  global_y  = (2·row1 + row2 + ly) /  4    ← resolución  4× en Y
 """
 import json
 import threading
@@ -18,18 +17,19 @@ import anthropic
 
 from tutorial_coach.config import (
     MODEL, PLAN_SYSTEM,
-    PHASE1_PLAN_USER, PHASE2_COORDS_USER,
-    LOCATE_PHASE1_USER, LOCATE_PHASE2_USER,
+    PHASE1_PLAN_USER, LOCATE_PHASE1_USER,
+    PHASE2_SELECT_USER, PHASE3_COORDS_USER,
     VERIFY_PROMPT, FREEQ_PROMPT, WHERE_PROMPT,
 )
 from tutorial_coach.capture import (
-    capture_screen, capture_screen_and_squares,
+    capture_screen, capture_for_three_phase,
+    make_phase2_crop, make_phase3_crop,
     GRID_COLS, GRID_ROWS,
 )
 from tutorial_coach.signals import Signals
 
-_COLS = GRID_COLS
-_ROWS = GRID_ROWS
+_COLS = GRID_COLS   # 4
+_ROWS = GRID_ROWS   # 2
 
 
 class AICoach:
@@ -40,7 +40,7 @@ class AICoach:
         self._busy   = False
         self._lock   = threading.Lock()
 
-    # ── Utilidades ─────────────────────────────────────────────────────────────
+    # ── Concurrencia ───────────────────────────────────────────────────────────
     def _is_busy(self) -> bool:
         with self._lock:
             if self._busy:
@@ -53,9 +53,13 @@ class AICoach:
             self._busy = False
 
     def cancel(self):
-        """Libera el lock para permitir nuevas operaciones (hilo bg sigue corriendo)."""
+        """Libera el lock (el hilo bg sigue hasta completar su llamada actual)."""
         self._release()
 
+    def _bg(self, fn):
+        threading.Thread(target=fn, daemon=True).start()
+
+    # ── Claude ─────────────────────────────────────────────────────────────────
     def _call_claude(self, system: str, user_text: str,
                      image_b64: str | None = None,
                      max_tokens: int = 256) -> str:
@@ -77,12 +81,11 @@ class AICoach:
         return resp.content[0].text.strip()
 
     def _parse_json(self, raw: str) -> dict:
-        """Extrae JSON robusto con tres estrategias antes de fallar."""
+        """3 estrategias para extraer JSON de la respuesta."""
         try:
             return json.loads(raw.strip())
         except json.JSONDecodeError:
             pass
-
         start = raw.find("{")
         end   = raw.rfind("}") + 1
         if start != -1 and end > start:
@@ -90,14 +93,13 @@ class AICoach:
                 return json.loads(raw[start:end])
             except json.JSONDecodeError:
                 pass
-
         if start != -1:
-            depth, in_str, escaped = 0, False, False
+            depth, in_str, esc = 0, False, False
             for i, c in enumerate(raw[start:], start):
-                if escaped:
-                    escaped = False; continue
+                if esc:
+                    esc = False; continue
                 if c == "\\" and in_str:
-                    escaped = True; continue
+                    esc = True; continue
                 if c == '"':
                     in_str = not in_str; continue
                 if not in_str:
@@ -110,51 +112,71 @@ class AICoach:
                                 return json.loads(raw[start:i + 1])
                             except json.JSONDecodeError:
                                 break
+        raise ValueError(f"JSON no encontrado: {raw[:200]}")
 
-        raise ValueError(f"Respuesta de IA no contiene JSON válido: {raw[:200]}")
+    # ── Conversión de tres fases a global ──────────────────────────────────────
+    @staticmethod
+    def _to_global(sq1: int, sq2: int, lx: float, ly: float) -> tuple:
+        """
+        (sq1, sq2) ∈ [0,7], (lx, ly) ∈ [0.0, 1.0] → (gx, gy) globales.
 
-    def _bg(self, fn):
-        threading.Thread(target=fn, daemon=True).start()
-
-    # ── Conversión de cuadro a coordenadas globales ─────────────────────────
-    def _square_to_global(self, square_id: int,
-                          local_x: float, local_y: float) -> tuple:
-        """Convierte (square_id, local x/y) a coordenadas globales normalizadas."""
-        col = square_id % _COLS
-        row = square_id // _COLS
-        gx = (col + local_x) / _COLS
-        gy = (row + local_y) / _ROWS
+        Ejemplo con sq1=0, sq2=0, lx=ly=0.5:
+          col1=0 row1=0, col2=0 row2=0
+          gx = (0 + 0 + 0.5) / 16 = 0.03125  (centro del primer sub-cuadro)
+          gy = (0 + 0 + 0.5) /  4 = 0.125
+        """
+        col1, row1 = sq1 % _COLS, sq1 // _COLS
+        col2, row2 = sq2 % _COLS, sq2 // _COLS
+        gx = (_COLS * col1 + col2 + lx) / (_COLS ** 2)   # / 16
+        gy = (_ROWS * row1 + row2 + ly) / (_ROWS ** 2)   # /  4
         return gx, gy
 
-    def _phase2_coords(self, squares: list, square_id: int,
-                       element: str) -> tuple:
+    # ── Tres fases para un elemento ────────────────────────────────────────────
+    def _three_phase_coords(self, raw_img, phase1_b64: str,
+                            element: str, phase1_prompt: str) -> tuple:
         """
-        Fase 2: pide a Claude las coordenadas dentro del cuadro.
-        Devuelve (global_x, global_y) normalizadas 0.0-1.0.
-        En caso de error devuelve el centro del cuadro.
-        """
-        sq = max(0, min(_COLS * _ROWS - 1, square_id))
-        try:
-            prompt = PHASE2_COORDS_USER.format(element=element)
-            raw    = self._call_claude(PLAN_SYSTEM, prompt,
-                                       squares[sq], max_tokens=64)
-            data   = self._parse_json(raw)
-            lx = float(data.get("x", 0.5))
-            ly = float(data.get("y", 0.5))
-        except Exception:
-            lx, ly = 0.5, 0.5
-        return self._square_to_global(sq, lx, ly)
+        Ejecuta las 3 fases y devuelve (gx, gy) globales normalizadas.
+        Llama a Claude 3 veces. Devuelve centro del área como fallback si falla.
 
-    # ── Generar plan (dos fases) ───────────────────────────────────────────────
+        phase1_prompt ya formateado (incluye el objetivo).
+        """
+        # Fase 1: cuadro en la pantalla completa
+        raw1 = self._call_claude(PLAN_SYSTEM, phase1_prompt,
+                                 phase1_b64, max_tokens=32)
+        sq1  = max(0, min(_COLS * _ROWS - 1,
+                          int(self._parse_json(raw1).get("square", 0))))
+
+        # Fase 2: sub-cuadro dentro del cuadro seleccionado
+        sq1_raw, phase2_b64 = make_phase2_crop(raw_img, sq1)
+        prompt2 = PHASE2_SELECT_USER.format(element=element)
+        raw2    = self._call_claude(PLAN_SYSTEM, prompt2,
+                                    phase2_b64, max_tokens=32)
+        sq2     = max(0, min(_COLS * _ROWS - 1,
+                             int(self._parse_json(raw2).get("square", 0))))
+
+        # Fase 3: coords exactas dentro del sub-cuadro con % grid
+        phase3_b64 = make_phase3_crop(sq1_raw, sq2)
+        prompt3    = PHASE3_COORDS_USER.format(element=element)
+        raw3       = self._call_claude(PLAN_SYSTEM, prompt3,
+                                       phase3_b64, max_tokens=32)
+        data3 = self._parse_json(raw3)
+        lx = float(data3.get("x", 0.5))
+        ly = float(data3.get("y", 0.5))
+        lx = max(0.0, min(1.0, lx))
+        ly = max(0.0, min(1.0, ly))
+
+        return self._to_global(sq1, sq2, lx, ly)
+
+    # ── Generar plan ───────────────────────────────────────────────────────────
     def generate_plan(self, goal: str):
         if self._is_busy():
             return
         self.goal = goal
 
-        # Fase 0: captura en hilo principal
+        # Captura en hilo principal
         try:
             self.signals.status_changed.emit("Capturando pantalla…")
-            phase1_b64, squares, lw, lh = capture_screen_and_squares()
+            raw_img, phase1_b64, lw, lh = capture_for_three_phase()
         except Exception as e:
             self._release()
             self.signals.error_occurred.emit(f"Error capturando pantalla: {e}")
@@ -162,7 +184,7 @@ class AICoach:
 
         def _run():
             try:
-                # Fase 1: qué pasos y en qué cuadro está cada elemento
+                # Fase 1A: obtener el plan completo con cuadros aproximados
                 self.signals.status_changed.emit("Tortuga está pensando…")
                 prompt1 = PHASE1_PLAN_USER.format(goal=goal)
                 raw1    = self._call_claude(PLAN_SYSTEM, prompt1,
@@ -172,19 +194,41 @@ class AICoach:
                 if "steps" not in plan or not plan["steps"]:
                     raise ValueError("El plan no tiene pasos.")
 
-                # Fase 2: coordenadas precisas para cada paso
                 total = len(plan["steps"])
-                for i, s in enumerate(plan["steps"]):
+
+                # Fases 2-3: afinar coordenadas para cada paso
+                for i, step in enumerate(plan["steps"]):
+                    element = step.get("element", "el elemento")
                     self.signals.status_changed.emit(
-                        f"Ubicando paso {i + 1}/{total}…")
-                    sq      = int(s.get("square", 0))
-                    element = s.get("element", "el elemento")
-                    gx, gy  = self._phase2_coords(squares, sq, element)
-                    s["target_x"] = gx
-                    s["target_y"] = gy
-                    s.setdefault("region_w", 0.08)
-                    s.setdefault("region_h", 0.04)
-                    s.setdefault("element",  element)
+                        f"Localizando paso {i + 1}/{total}…")
+
+                    # El sq1 del plan ya es una buena pista para Fase 1 de coords.
+                    # Re-usamos la Fase 1 del plan: ya tenemos sq1 = step["square"].
+                    # Saltamos directamente a Fase 2 (usando sq1 del plan).
+                    sq1 = max(0, min(_COLS * _ROWS - 1,
+                                     int(step.get("square", 0))))
+
+                    sq1_raw, phase2_b64 = make_phase2_crop(raw_img, sq1)
+                    prompt2 = PHASE2_SELECT_USER.format(element=element)
+                    raw2    = self._call_claude(PLAN_SYSTEM, prompt2,
+                                               phase2_b64, max_tokens=32)
+                    sq2 = max(0, min(_COLS * _ROWS - 1,
+                                     int(self._parse_json(raw2).get("square", 0))))
+
+                    phase3_b64 = make_phase3_crop(sq1_raw, sq2)
+                    prompt3    = PHASE3_COORDS_USER.format(element=element)
+                    raw3       = self._call_claude(PLAN_SYSTEM, prompt3,
+                                                   phase3_b64, max_tokens=32)
+                    data3 = self._parse_json(raw3)
+                    lx = max(0.0, min(1.0, float(data3.get("x", 0.5))))
+                    ly = max(0.0, min(1.0, float(data3.get("y", 0.5))))
+
+                    gx, gy = self._to_global(sq1, sq2, lx, ly)
+                    step["target_x"] = gx
+                    step["target_y"] = gy
+                    step.setdefault("region_w", 0.06)
+                    step.setdefault("region_h", 0.03)
+                    step.setdefault("element",  element)
 
                 self.signals.plan_ready.emit(plan)
                 self.signals.status_changed.emit("Listo")
@@ -201,18 +245,15 @@ class AICoach:
 
         self._bg(_run)
 
-    # ── Mover mouse por voz (dos fases) ───────────────────────────────────────
+    # ── Mover mouse por voz ────────────────────────────────────────────────────
     def find_and_move(self, description: str):
-        """
-        Captura pantalla, ubica el elemento mediante dos fases y mueve el mouse.
-        Emite mouse_moved(x, y) cuando termina.
-        """
+        """Tres fases → mueve el mouse al elemento descripto."""
         if self._is_busy():
             return
 
         try:
-            self.signals.status_changed.emit("Buscando elemento…")
-            phase1_b64, squares, lw, lh = capture_screen_and_squares()
+            self.signals.status_changed.emit("Capturando pantalla…")
+            raw_img, phase1_b64, lw, lh = capture_for_three_phase()
         except Exception as e:
             self._release()
             self.signals.error_occurred.emit(f"Error capturando: {e}")
@@ -220,40 +261,44 @@ class AICoach:
 
         def _run():
             try:
-                # Fase 1: ¿en qué cuadro?
+                self.signals.status_changed.emit("Buscando elemento (fase 1)…")
                 prompt1 = LOCATE_PHASE1_USER.format(element=description)
                 raw1    = self._call_claude(PLAN_SYSTEM, prompt1,
                                             phase1_b64, max_tokens=32)
-                data1   = self._parse_json(raw1)
-                sq      = max(0, min(_COLS * _ROWS - 1,
-                                     int(data1.get("square", 0))))
+                sq1     = max(0, min(_COLS * _ROWS - 1,
+                                     int(self._parse_json(raw1).get("square", 0))))
 
-                # Fase 2: coords exactas en el cuadro
-                prompt2 = LOCATE_PHASE2_USER.format(element=description)
+                self.signals.status_changed.emit("Acercando (fase 2)…")
+                sq1_raw, phase2_b64 = make_phase2_crop(raw_img, sq1)
+                prompt2 = PHASE2_SELECT_USER.format(element=description)
                 raw2    = self._call_claude(PLAN_SYSTEM, prompt2,
-                                            squares[sq], max_tokens=32)
-                data2   = self._parse_json(raw2)
-                lx = float(data2.get("x", 0.5))
-                ly = float(data2.get("y", 0.5))
+                                            phase2_b64, max_tokens=32)
+                sq2     = max(0, min(_COLS * _ROWS - 1,
+                                     int(self._parse_json(raw2).get("square", 0))))
 
-                gx, gy = self._square_to_global(sq, lx, ly)
+                self.signals.status_changed.emit("Ajustando posición (fase 3)…")
+                phase3_b64 = make_phase3_crop(sq1_raw, sq2)
+                prompt3    = PHASE3_COORDS_USER.format(element=description)
+                raw3       = self._call_claude(PLAN_SYSTEM, prompt3,
+                                               phase3_b64, max_tokens=32)
+                data3 = self._parse_json(raw3)
+                lx = max(0.0, min(1.0, float(data3.get("x", 0.5))))
+                ly = max(0.0, min(1.0, float(data3.get("y", 0.5))))
 
-                # Convertir a píxeles lógicos
+                gx, gy = self._to_global(sq1, sq2, lx, ly)
+
                 from PyQt5.QtWidgets import QApplication
                 geo    = QApplication.primaryScreen().geometry()
                 px, py = int(gx * geo.width()), int(gy * geo.height())
 
-                # Mover mouse
                 from pynput.mouse import Controller
                 Controller().position = (px, py)
 
                 self.signals.mouse_moved.emit(px, py)
-                self.signals.status_changed.emit(
-                    f"Mouse movido a {description}")
+                self.signals.status_changed.emit(f"Mouse en {description}")
 
             except Exception as e:
-                self.signals.error_occurred.emit(
-                    f"No encontré el elemento: {e}")
+                self.signals.error_occurred.emit(f"No encontré el elemento: {e}")
             finally:
                 self._release()
 
@@ -265,7 +310,7 @@ class AICoach:
             return
 
         try:
-            img, pw, ph = capture_screen()
+            img, _, _ = capture_screen()
         except Exception:
             self._release()
             self.signals.verify_result.emit({"completed": True, "feedback": ""})
@@ -280,15 +325,13 @@ class AICoach:
                     instruction=step["instruction"],
                     element=step.get("element", ""),
                 )
-                raw    = self._call_claude(PLAN_SYSTEM, prompt,
-                                           img, max_tokens=256)
+                raw    = self._call_claude(PLAN_SYSTEM, prompt, img, max_tokens=256)
                 result = self._parse_json(raw)
                 result.setdefault("completed", False)
                 result.setdefault("feedback", "")
                 self.signals.verify_result.emit(result)
             except Exception:
-                self.signals.verify_result.emit(
-                    {"completed": True, "feedback": ""})
+                self.signals.verify_result.emit({"completed": True, "feedback": ""})
             finally:
                 self._release()
 
@@ -309,10 +352,9 @@ class AICoach:
         def _run():
             try:
                 self.signals.status_changed.emit("Pensando…")
-                prompt = FREEQ_PROMPT.format(
-                    question=question, mx=mouse_x, my=mouse_y)
-                answer = self._call_claude(PLAN_SYSTEM, prompt,
-                                           img, max_tokens=300)
+                prompt = FREEQ_PROMPT.format(question=question,
+                                             mx=mouse_x, my=mouse_y)
+                answer = self._call_claude(PLAN_SYSTEM, prompt, img, max_tokens=300)
                 self.signals.free_answer.emit(answer)
                 self.signals.status_changed.emit("Listo")
             except Exception as e:
